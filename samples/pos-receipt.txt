@@ -1,0 +1,14 @@
+Store Demo
+USD Cash Sale
+Order No.: INV-1001
+Buyer Name: Acme Ltd
+Buyer TIN: 1234567890
+Buyer VAT: 123456789
+Date: 29/10/2026 10:15
+--------------------------------
+Bread Loaf 1.00 2.50 2.50
+Fresh Milk 2.00 1.25 2.50
+--------------------------------
+Items count: 2
+Total: 5.00
+Payment: CASH

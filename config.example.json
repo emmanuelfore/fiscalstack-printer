@@ -1,0 +1,69 @@
+{
+  "listenAddress": "127.0.0.1",
+  "listenPort": 9100,
+  "readIdleTimeoutSeconds": 3,
+  "maxJobBytes": 10485760,
+
+  "apiEndpoint": "https://fiscalstack.co.zw/api/v1/",
+  "apiKey": "REPLACE_WITH_FISCALSTACK_API_KEY",
+  "apiTimeoutSeconds": 30,
+
+  "ghostscriptPath": "",
+  "ghostscriptTimeoutSeconds": 30,
+
+  "company": {
+    "name": "My Shop",
+    "tin": "1234567890",
+    "vatNumber": "123456789",
+    "address": "1 Main Street, Harare",
+    "phone": "+263 77 000 0000",
+    "email": "shop@example.com",
+    "logoPath": ""
+  },
+
+  "printing": {
+    "enabled": true,
+    "format": "thermal",
+    "printerName": "EPSON TM-T20III Receipt",
+    "a4PrinterName": "",
+    "paperWidthMm": 80,
+    "copies": 1,
+    "retryCount": 2,
+    "accentColor": "#2563EB",
+    "footerText": "Thank you for your business!"
+  },
+
+  "parse": {
+    "productStartLine": "Order No.",
+    "productEndLine": "Items count",
+    "invoiceNumber": "Order No.",
+    "customerName": "Buyer Name",
+    "customerAddress": "Buyer Address",
+    "customerEmail": "Buyer Email",
+    "customerTIN": "Buyer TIN",
+    "customerVATNumber": "Buyer VAT",
+    "customerTelephoneNumber": "Buyer Phone",
+    "currency": "USD",
+    "paymentMethod": "CASH",
+    "currencies": [
+      { "keyword": "USD", "name": "USD" },
+      { "keyword": "US$", "name": "USD" },
+      { "keyword": "ZWG", "name": "ZWG" },
+      { "keyword": "ZWL", "name": "ZWG" }
+    ],
+    "vatFlag": "1",
+    "vatRate": 0.15,
+    "taxSymbol": "",
+    "nonTaxSymbol": ""
+  },
+
+  "storage": {
+    "dataDirectory": "",
+    "retainJobs": true,
+    "retentionDays": 30
+  },
+
+  "offline": {
+    "enabled": false
+  }
+}

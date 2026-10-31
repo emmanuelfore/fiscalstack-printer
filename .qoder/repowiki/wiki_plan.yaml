@@ -1,0 +1,151 @@
+# wiki_plan.yaml — PrintInterceptor
+# Created from the fiscalisation audit + README scope. All paths are scope globs
+# (forward slashes are normalised by the YAML consumer on any OS).
+# NOTE: this file only takes effect when the wiki / knowledge build is re-run.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# File scope — full repo, build output removed
+# ---------------------------------------------------------------------------
+scope:
+  include:
+    - "src/**"
+    - "packaging/**"
+    - "tests/**"
+    - "samples/**"
+    - "PrintInterceptor.sln"
+    - "README.md"
+    - "config.example.json"
+    - "addprinter.ps1"
+    - "install-service.ps1"
+  exclude:
+    - "**/bin/**"
+    - "**/obj/**"
+    - ".vs/**"
+    - "publish/**"
+    - "**/*.log"
+
+# ---------------------------------------------------------------------------
+# RepoWiki — code/architecture analysis
+# ---------------------------------------------------------------------------
+repowiki:
+  template: architecture
+
+  # Empty documents list = the planner auto-plans pages under the architecture
+  # skeleton. Page whitelist was not requested; add entries here to force shape.
+  documents: []
+
+  notes:
+    - text: >-
+        Every POST /fiscalize creates a real ZIMRA fiscal document. Never describe
+        any code path as safe to auto-retry once a request has been sent to the
+        server; the ambiguity handling is the central design constraint of this app.
+      author: fiscalisation-audit
+    - text: >-
+        Ledger semantics are exact: JobLedger.Claim writes InFlight atomically
+        before the API call. InFlight, Fiscalised, FiscalisedOffline and
+        AmbiguousFailure block re-fiscalisation; Rejected and NeedsReview do not.
+        Dedup works on both the text hash and invoice number + business date.
+      author: fiscalisation-audit
+    - text: >-
+        A corrupt ledger.json or fiscal-chain.json aborts startup deliberately.
+        Document this as intentional fail-closed behaviour, not a defect, and never
+        suggest silently recreating those files.
+      author: fiscalisation-audit
+    - text: >-
+        Failure taxonomy in FiscalStackClient: HTTP 4xx or success=false is
+        Rejected; 5xx, timeout, transport failure and unreadable 2xx are Ambiguous.
+        An offline receipt is issued only when the reachability probe gets no HTTP
+        response at all — a timed-out request is never converted into one.
+      author: fiscalisation-audit
+    - text: >-
+        FiscalChainStore.TrySignNext signs and advances the counter chain under one
+        lock and persists it before printing. RecordOnlineSuccess only moves counters
+        forward, refuses a different device id, and refuses blank or zero state, so
+        the chain can never be rewound or shared between devices.
+      author: fiscalisation-audit
+    - text: >-
+        OfflineSigner must mirror the ZIMRA device signature exactly: cents-based
+        stringToSign, tax buckets sorted by taxId then taxCode, VAT-inclusive
+        back-out with 4dp unit price and 2dp line rounding, SHA-256 with RSA PKCS#1
+        v1.5, an MD5-derived 16-hex verification code and the fdms.zimra.co.zw QR
+        payload. The MD5 use is mandated by ZIMRA — do not present it as a weakness.
+      author: fiscalisation-audit
+    - text: >-
+        The offline sync queue is strict FIFO, oldest first, one receipt at a time.
+        A rejection moves the receipt to offline-failed and writes a durable pause
+        marker; an ambiguous sync leaves the receipt at the head and blocks later
+        receipts without writing a pause marker.
+      author: fiscalisation-audit
+    - text: >-
+        Offline signing is scoped to one open fiscal day. Queued receipts must drain
+        before closeDay or the server's stale-day close (24 hours default), otherwise
+        they are rejected and have to be re-issued from the POS.
+      author: fiscalisation-audit
+    - text: >-
+        Fiscal output is drawn directly with Windows GDI — no browser, WebView or
+        PDF toolchain, and no PDF artefact is produced. The A4 layout mirrors
+        FiscalBridge's Modern Blue template but is an independent implementation.
+        Nothing is printed for Rejected or Ambiguous outcomes, and a reprint comes
+        from PrintSnapshotStore, never from a second fiscalise call.
+      author: fiscalisation-audit
+    - text: >-
+        Deployment model: one instance serves one capture printer, one tenant and one
+        fiscal device. The Windows service runs as LocalSystem and cannot host a tray
+        icon, so service mode and tray mode are mutually exclusive per till.
+      author: fiscalisation-audit
+    - text: >-
+        Two known defects must be reported as issues, not as intended design:
+        (1) PrintJobPipeline.IssueOfflineReceiptAsync advances the chain before
+        OfflineQueue.TryEnqueue, so a queue-write failure consumes a counter and
+        leaves a permanent gap (grey receipt); (2) OfflineReceiptService.RestrictToOwner
+        returns early on Windows, so the cached RSA device key in
+        offline-provisioning.json relies entirely on packaging/install.ps1 having set
+        the folder ACL.
+      author: fiscalisation-audit
+    - text: >-
+        Module boundary to respect: PrintInterceptor.Core holds all fiscal decision
+        logic; src/PrintInterceptor is only the Windows host (composition root, hosted
+        services, WinForms tray and dialogs) and contains no fiscal rules of its own.
+      author: fiscalisation-audit
+    - text: >-
+        parse.vatFlag follows the FiscalStack convention, which is easy to invert:
+        "1" means printed prices already include VAT, "0" means VAT is added on top.
+      author: fiscalisation-audit
+
+# ---------------------------------------------------------------------------
+# Knowledge cards — module split
+# ---------------------------------------------------------------------------
+knowledgecard:
+  notes:
+    - text: >-
+        Create one card per folder under src/PrintInterceptor.Core: Capture,
+        Decoding, Parsing, Fiscalisation, Offline, State, Storage, Pipeline,
+        Printing, Configuration, Diagnostics. Do not merge them into fewer units.
+      author: fiscalisation-audit
+    - text: >-
+        Fiscalisation and Offline are distinct cards: Fiscalisation owns the API
+        client, request factory, ZIMRA signing, provisioning and company profile;
+        Offline owns the durable queue and the oldest-first sync engine.
+      author: fiscalisation-audit
+    - text: >-
+        Capture vs Decoding and State vs Storage must not be merged: Capture is the
+        raw TCP listener and PrintJob bytes, Decoding is text extraction
+        (Ghostscript txtwrite) and sanitising; State is durable fiscal state
+        (ledger, counter chain), Storage is captured-job persistence and print
+        snapshots used for reprints.
+      author: fiscalisation-audit
+    - text: >-
+        Add separate cards for the Windows host src/PrintInterceptor (Program,
+        hosted services, TrayApplicationContext, FiscalStatusForm, JobsForm,
+        SettingsForm, A4InvoicePrinter, WindowsGdiReceiptPrinter), for deployment
+        (packaging/, addprinter.ps1, install-service.ps1, config.example.json),
+        and for tests/PrintInterceptor.Core.Tests mapping each suite to its module.
+      author: fiscalisation-audit
+    - text: >-
+        The Pipeline card is the orchestrator: document the call order
+        (decode, parse, guard, dedup, claim, fiscalise or offline-sign, sync, print)
+        and the cross-module invariants, and link to the other cards instead of
+        restating their internals.
+      author: fiscalisation-audit
