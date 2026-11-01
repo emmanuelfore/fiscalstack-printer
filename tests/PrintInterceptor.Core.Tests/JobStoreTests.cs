@@ -69,6 +69,37 @@ public sealed class JobStoreTests : IDisposable
         Assert.False(Directory.Exists(store.DirectoryPath));
     }
 
+    [Fact]
+    public void KeepsTheBytesUsedToStampTheOriginalInvoice()
+    {
+        var store = CreateStore();
+        var raw = "%!PS-Adobe-3.0\ninvoice"u8.ToArray();
+
+        var path = store.SaveOriginalCopy("stamp-hash", raw, JobFormat.PostScript);
+
+        Assert.NotNull(path);
+        Assert.EndsWith("stamp-hash.ps", path, StringComparison.Ordinal);
+        Assert.Equal("original", Path.GetFileName(Path.GetDirectoryName(path)!));
+        Assert.Equal(raw, File.ReadAllBytes(path!));
+
+        // A reprint resolves the same path; the POS's bytes are never overwritten.
+        var again = store.SaveOriginalCopy("stamp-hash", "different"u8.ToArray(), JobFormat.PostScript);
+        Assert.Equal(path, again);
+        Assert.Equal(raw, File.ReadAllBytes(again!));
+    }
+
+    [Fact]
+    public void DisabledRetentionLeavesNothingToStamp()
+    {
+        var config = new InterceptorConfig
+        {
+            Storage = new StorageConfig { DataDirectory = _directory, RetainJobs = false }
+        };
+        var store = new JobStore(config, NullLog.Instance);
+
+        Assert.Null(store.SaveOriginalCopy("stamp-hash", "received"u8.ToArray(), JobFormat.Text));
+    }
+
     private JobStore CreateStore() => new(
         new InterceptorConfig { Storage = new StorageConfig { DataDirectory = _directory } },
         NullLog.Instance);

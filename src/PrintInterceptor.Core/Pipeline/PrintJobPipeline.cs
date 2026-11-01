@@ -72,6 +72,9 @@ public sealed class PrintJobPipeline : IJobProcessor
         var printFormat = ResolvePrintFormat(decoded.Format);
         var hash = Hashing.Sha256Hex(decoded.Text.Trim());
         var sourceFile = _jobStore.Save(hash, decoded, job.Data);
+        var originalJobPath = _config.Printing.Template == "original"
+            ? _jobStore.SaveOriginalCopy(hash, job.Data, decoded.Format)
+            : null;
         var parse = _parser.Parse(decoded.Text);
 
         foreach (var warning in parse.Warnings)
@@ -139,6 +142,15 @@ public sealed class PrintJobPipeline : IJobProcessor
             $"Fiscalising {receipt.TransactionType} {receipt.InvoiceNumber ?? "(auto invoice)"} " +
             $"{receipt.Total:0.00} {receipt.Currency}, {receipt.Items.Count} item(s).");
 
+        if (request.Currency is null && !string.IsNullOrWhiteSpace(receipt.Currency))
+        {
+            // The gateway records the sale in its own default currency, so the
+            // fiscal receipt will not name the currency printed on the till roll.
+            _log.Warn(
+                $"{receipt.Currency} is not accepted by the fiscalisation route; " +
+                "the fiscal receipt will carry the gateway's default currency.");
+        }
+
         if (_offline.Enabled)
         {
             // Pending offline receipts own the next ZIMRA counters. Sync them
@@ -151,7 +163,8 @@ public sealed class PrintJobPipeline : IJobProcessor
                     await _offlineSync.RunExclusiveAsync(
                         async () =>
                         {
-                            await IssueOfflineReceiptAsync(hash, receipt, request, sync.Error, printFormat, cancellationToken);
+                            await IssueOfflineReceiptAsync(
+                            hash, receipt, request, sync.Error, printFormat, originalJobPath, cancellationToken);
                             return true;
                         },
                         cancellationToken);
@@ -165,7 +178,8 @@ public sealed class PrintJobPipeline : IJobProcessor
                 await _offlineSync.RunExclusiveAsync(
                     async () =>
                     {
-                        await IssueOfflineReceiptAsync(hash, receipt, request, null, printFormat, cancellationToken);
+                        await IssueOfflineReceiptAsync(
+                        hash, receipt, request, null, printFormat, originalJobPath, cancellationToken);
                         return true;
                     },
                     cancellationToken);
@@ -185,7 +199,8 @@ public sealed class PrintJobPipeline : IJobProcessor
                 $"day={outcome.Response.Receipt?.FiscalDayNo?.ToString() ?? "-"} " +
                 $"counter={outcome.Response.Receipt?.ReceiptCounter?.ToString() ?? "-"}.");
 
-            await PrintFiscalReceiptAsync(hash, receipt, outcome.Response, printFormat, cancellationToken);
+            await PrintFiscalReceiptAsync(
+                hash, receipt, outcome.Response, printFormat, originalJobPath, cancellationToken);
             return;
         }
 
@@ -217,6 +232,7 @@ public sealed class PrintJobPipeline : IJobProcessor
         FiscalizeRequest request,
         string? syncError,
         PrintFormat format,
+        string? originalJobPath,
         CancellationToken cancellationToken)
     {
         if (!_offline.TryIssue(receipt, out var signed, out var error))
@@ -262,13 +278,15 @@ public sealed class PrintJobPipeline : IJobProcessor
             $"counter={signed.ReceiptCounter} total={signed.ReceiptTotal:0.00} {signed.Currency}. " +
             $"It is queued for sync ({_offlineQueue.Count} pending).");
 
-        await PrintModelAsync(hash, BuildOfflinePrintModel(receipt, signed, format), cancellationToken);
+        await PrintModelAsync(
+            hash, BuildOfflinePrintModel(receipt, signed, format, originalJobPath), cancellationToken);
     }
 
     private ReceiptPrintModel BuildOfflinePrintModel(
         ParsedReceipt receipt,
         OfflineSignedReceipt signed,
-        PrintFormat format)
+        PrintFormat format,
+        string? originalJobPath)
     {
         var priceSign = string.Equals(receipt.TransactionType, "CreditNote", StringComparison.OrdinalIgnoreCase) ? -1m : 1m;
 
@@ -335,6 +353,8 @@ public sealed class PrintJobPipeline : IJobProcessor
             FiscalDayNo = signed.FiscalDayNo,
             Notes = receipt.CreditNoteReason,
             IsOffline = true,
+            Template = ResolveTemplate(originalJobPath),
+            OriginalJobPath = originalJobPath,
             PrinterName = _config.Printing.PrinterName,
             A4PrinterName = _config.Printing.A4PrinterName,
             PaperWidthMm = _config.Printing.PaperWidthMm,
@@ -349,9 +369,11 @@ public sealed class PrintJobPipeline : IJobProcessor
         ParsedReceipt receipt,
         FiscalizeResponse response,
         PrintFormat format,
+        string? originalJobPath,
         CancellationToken cancellationToken)
     {
-        return PrintModelAsync(hash, BuildPrintModel(receipt, response, format), cancellationToken);
+        return PrintModelAsync(
+            hash, BuildPrintModel(receipt, response, format, originalJobPath), cancellationToken);
     }
 
     /// <summary>
@@ -445,7 +467,8 @@ public sealed class PrintJobPipeline : IJobProcessor
     private ReceiptPrintModel BuildPrintModel(
         ParsedReceipt receipt,
         FiscalizeResponse response,
-        PrintFormat format)
+        PrintFormat format,
+        string? originalJobPath)
     {
         var fiscalReceipt = response.Receipt;
 
@@ -526,6 +549,8 @@ public sealed class PrintJobPipeline : IJobProcessor
             ReceiptGlobalNo = fiscalReceipt?.ReceiptGlobalNo,
             FiscalDayNo = fiscalReceipt?.FiscalDayNo,
             Notes = receipt.CreditNoteReason,
+            Template = ResolveTemplate(originalJobPath),
+            OriginalJobPath = originalJobPath,
             PrinterName = _config.Printing.PrinterName,
             A4PrinterName = _config.Printing.A4PrinterName,
             PaperWidthMm = _config.Printing.PaperWidthMm,
@@ -541,9 +566,30 @@ public sealed class PrintJobPipeline : IJobProcessor
         _config.Printing.Format.Trim().ToLowerInvariant() switch
         {
             "a4" => PrintFormat.A4,
-            "auto" => jobFormat == JobFormat.Pdf ? PrintFormat.A4 : PrintFormat.Thermal,
+            "auto" => jobFormat is JobFormat.Pdf or JobFormat.PostScript ? PrintFormat.A4 : PrintFormat.Thermal,
             _ => PrintFormat.Thermal
         };
+
+    /// <summary>
+    /// The original template needs the retained POS bytes; without them (retention
+    /// off, or the write failed) the fiscal template is printed so the customer
+    /// still leaves with a fiscal document.
+    /// </summary>
+    private PrintTemplate ResolveTemplate(string? originalJobPath)
+    {
+        if (_config.Printing.Template != "original")
+        {
+            return PrintTemplate.Fiscal;
+        }
+
+        if (string.IsNullOrWhiteSpace(originalJobPath) || !File.Exists(originalJobPath))
+        {
+            _log.Warn("printing.template is 'original' but the job's source bytes were not retained; using the fiscal template.");
+            return PrintTemplate.Fiscal;
+        }
+
+        return PrintTemplate.Original;
+    }
 
     private string CurrentDeviceId()
     {

@@ -14,6 +14,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The shipped profiles are product behaviour: these tests prove they load,
+         that sage equals the built-in rules and that zohobooks parses its layout. -->
+    <Content Include="../../profiles/*.json" Link="profiles/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\PrintInterceptor.Core\PrintInterceptor.Core.csproj" />
   </ItemGroup>
 

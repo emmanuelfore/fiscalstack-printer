@@ -19,7 +19,7 @@ POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
               ▼
       PrintInterceptor service / tray app
         ├─ decode  : raw text, or PostScript/PDF via Ghostscript txtwrite
-        ├─ parse   : markers + qty × price ≈ amount column detection
+        ├─ parse   : profile-driven labels + qty × price ≈ amount column detection
         ├─ guard   : duplicates, totals, empty receipts → hold, never fiscalise
         ├─ fiscalise: POST /api/v1/fiscalize (X-API-Key)
         │            └─ unreachable + offline.enabled → sign, queue, print
@@ -35,8 +35,10 @@ POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
 - For offline signing only: a reachable FiscalStack once, so the device key, tax mapping and
   counters can be provisioned and cached. Nothing else is configured locally.
 - **Ghostscript** only if the virtual printer uses a PostScript or PDF driver
-  (`Generic / Text Only` needs no Ghostscript). Install 64-bit Ghostscript and either add
-  `gswin64c.exe` to `PATH` or set `ghostscriptPath` in the config.
+  (`Generic / Text Only` needs no Ghostscript). Either build the package with
+  `-GhostscriptDir` so it ships inside the release, or install 64-bit Ghostscript on the
+  till and add `gswin64c.exe` to `PATH` / set `ghostscriptPath`. The app checks the config
+  value, then `<exe folder>\ghostscript\bin`, then `PATH`, then `Program Files\gs`.
 
 ## Build
 
@@ -107,10 +109,12 @@ most:
 | `printing.format` | `thermal`, `a4`, or `auto` (A4 when the captured job was a PDF, thermal otherwise). See [A4 invoices](#a4-invoices). |
 | `printing.a4PrinterName` | A4/laser printer for invoice output. Empty = `printing.printerName`, then the Windows default. |
 | `printing.paperWidthMm` | `58` or `80` for thermal output. |
+| `printing.template` | `fiscal` (this app's layout) or `original` (the POS's own document with the fiscal proof stamped on it). See [Print the POS's own invoice](#print-the-poss-s-own-invoice). |
+| `printing.accentColor` | Accent used by the fiscal layouts (rules, table header, totals). Defaults to `#4F46E5`, the indigo of the sample invoice. |
 | `printing.enabled` | `false` fiscalises without printing (use only knowingly). |
-| `ghostscriptPath` | `gswin64c.exe` path when PostScript/PDF jobs are captured. |
+| `ghostscriptPath` | `gswin64c.exe` path when PostScript/PDF jobs are captured. Leave empty for a bundled or PATH install. |
 | `company` | Printed on the fiscal document. `email` and `logoPath` are used by the A4 layout; `logoPath` is relative to the config folder. |
-| `parse.*` | Markers and metadata keywords for this POS layout. |
+| `parse.*` | The layout rules for this POS: markers, labels, keywords, date formats, line patterns and tolerances. See [Parsing profiles](#parsing-profiles). |
 | `offline.enabled` | Sign receipts on the till when the API is unreachable. Everything it needs (device, key, taxes, counters) is provisioned from FiscalStack with the API key; see [Offline signing](#offline-signing). |
 | `storage.retentionDays` | How long decoded and raw jobs are kept. |
 
@@ -139,6 +143,106 @@ Other environment overrides:
 | --- | --- |
 | `PRINTINTERCEPTOR_CONFIG` | Full path to `config.json` (same as `--config`). |
 | `PRINTINTERCEPTOR_API_KEY` | Replaces `apiKey` from the file. |
+
+## Parsing profiles
+
+Every rule the parser uses to *find* text — section markers, field labels, non-item
+keywords, date formats, the collapsed-invoice-table header words, the line-shape regular
+expressions and the numeric tolerances — lives under `parse.*`. A **profile** is that rule
+set as a named JSON file, so supporting a new POS is importing a file instead of shipping a
+build. Two ship in `{app}\profiles`:
+
+| Profile | Contents |
+| --- | --- |
+| `sage` | Every rule stated in full. This is the layout the parser was written for, so it doubles as the template to copy. |
+| `zohobooks` | Only what differs: `NUMBER:` instead of `Order No.:`, `Customer VAT No`, `Invoice Date`, and a `Notes:` line that ends the item table. |
+
+A profile states only the lines it changes; everything it leaves out keeps the built-in
+value. Profiles are read from two folders, and an installed file replaces the shipped one of
+the same name:
+
+| Folder | Contents |
+| --- | --- |
+| `{app}\profiles` | Shipped with the release. Read-only. |
+| `%ProgramData%\FiscalStack\PrintInterceptor\profiles` | Imported and captured profiles. |
+
+In **Settings → Receipt parsing profile**: pick one and press **Use this profile**,
+**Import…** a file received from another till, or **Save current rules as…** to capture what
+this till is reading correctly today and hand it to the next one. The tray menu has
+*Import receipt parse profile…* and *Open parse profiles folder*.
+
+Applying writes the resolved rules into `config.json` and records the name in `parse.profile`
+as provenance. The configuration stays the single source of truth, so deleting a profile file
+cannot leave a till unable to read its receipts, and rules tuned by hand survive a restart — a
+profile is only ever applied when an operator presses the button. The parser reads the rules
+when it starts, so an applied profile takes effect after PrintInterceptor (or the service)
+restarts.
+
+**What a profile cannot change.** A profile decides where text is found and how a line
+declares its VAT status, never what must add
+up. `qty × price = amount`, agreement with the printed total, and the column scoring stay in
+code, and `vatRate`, `vatFlag`, `currencies`, `paymentMethod` and the `taxSymbol` /
+`nonTaxSymbol` knobs are deliberately not profile
+fields — importing a layout can never move the numbers a receipt is fiscalised with. An
+import is rejected before it lands if a pattern is missing a group the parser reads (`value`,
+`name`, `qty`, `price`, `disc`, `vat`, `exclusive`, `amount`), does not compile, uses a
+`dateFormats` entry with no date tokens, sets a tolerance outside its sane range, names a tax
+type other than `STANDARD`, `ZERO_RATED` or `EXEMPT`, or uses a
+name that could escape the profiles folder. Every pattern also runs under
+`parse.limits.regexTimeoutMilliseconds` (1000 by default): a hand-written expression that
+backtracks forever holds that one job for review instead of stalling the till.
+
+### VAT status on the line
+
+Which bucket a line is filed under — `STANDARD`, `ZERO_RATED` or `EXEMPT` — is the only tax
+decision the till makes: the gateway maps it to a ZIMRA tax ID and charges the company rate
+behind the API key, so the rate itself is not read from the receipt and never travels with a
+profile. What does travel is the vocabulary for *reading* the bucket off the paper, because
+every POS prints it differently. A marker is honoured in three windows only:
+
+| Window | Where a marker may match | Example line |
+| --- | --- | --- |
+| `slot` | the tokens after the amount, or a code glued to it | `Bread Loaf 1.00 2.50 2.50 EX` |
+| `annotation` | text inside `()`, `[]`, `{}` or `<>` | `Statutory Levy (EXEMPT) 1.00 5.00 5.00` |
+| `section` | a header line, which names the item lines below it | `ZERO RATED` above the next items |
+
+`parse.defaultTaxType` (default `STANDARD`) files a line that declares nothing, and
+`parse.taxRules` is the ordered vocabulary:
+
+```json
+"taxRules": [
+  { "taxType": "EXEMPT", "markers": ["EXEMPT", "EX", "NO VAT", "NON-VAT", "C"],
+    "where": ["slot", "annotation", "section"] },
+  { "taxType": "ZERO_RATED", "markers": ["ZERO", "ZERO RATED", "ZR", "B"],
+    "where": ["slot", "annotation", "section"] },
+  { "taxType": "STANDARD", "markers": ["VAT", "STANDARD", "STD", "A"],
+    "where": ["slot", "annotation"] }
+]
+```
+
+The A/B/C letters are the tax codes a ZIMRA till prints, the same ones `offline.taxes`
+provisions. The longest marker on a line wins — `NON-VAT` is a better statement than the `VAT`
+inside it — and rule order only breaks ties. A code that shifts the columns, like the `EX`
+above, is split off before the columns are detected, so `qty × price = amount` still lines up.
+
+Three deliberate limits:
+
+- **The product description is never read.** `Zero Sugar Coke` and `Exempt Levy Water` stay
+  `STANDARD`: what the customer bought is not a tax statement. This is also a change for
+  `taxSymbol` / `nonTaxSymbol`, which used to be looked for anywhere in the name — they are
+  now slot/annotation markers at the lowest precedence, and stay out of profiles.
+- **A sale is never held over tax.** Two markers on one line, or none at all, is a warning on
+  the job and the receipt still fiscalises. Ambiguity is a profile-editing task, not a queue.
+  A receipt where *some* lines declared their status and others did not is the case worth
+  reading the warning for: that is what a missing code looks like.
+- **A 0% figure is not a claim of exemption.** An invoice row printing `0.00%` is read as
+  `ZERO_RATED` and warned about, because zero-rated and exempt are different ZIMRA buckets and
+  only the POS's own code tells them apart. If the POS prints one, capture it with the
+  optional `tax` group at the end of `parse.patterns.invoiceRow` — it is matched as a `slot`
+  marker, and that is how an exempt supply stops being filed as a zero-rated one.
+
+A marker made only of figures (`0%`, `15`) is rejected at import: the parser reads those
+tokens as amounts, so such a rule would silently do nothing.
 
 ## 3. Run
 
@@ -170,17 +274,19 @@ so choose one mode per till.
 - **Menu:** live API status, fiscal day number/state, *Open fiscal day…* / *Close fiscal day…*
   (enabled from the live state), queue size, receipts needing review, *Resume offline sync*
   (only while paused), *Sync offline receipts now*, *Fiscal status…*, *Fiscalisation jobs…*,
-  *Test connection*, *Settings…*, open the config / logs / data folders,
-  *Start with Windows*, *Exit*. Day open/close asks for confirmation and reports the gateway's
-  answer; the device state is polled every 30 seconds.
+  *Test connection*, *Settings…*, open the config / logs / data / parse-profile folders,
+  *Import receipt parse profile…*, *Start with Windows*, *Exit*. Day open/close asks for
+  confirmation and reports the gateway's answer; the device state is polled every 30 seconds.
 - **Notifications** (balloons on transition, not repeatedly): a fiscal day close failed, the
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
-- **Settings** edits the endpoint, API key, print format and printers, paper width and the
-  offline switch, then writes `config.json`. **Refresh from FiscalStack** provisions the ZIMRA
+- **Settings** edits the endpoint, API key, print format and printers, paper width, the
+  [parsing profile](#parsing-profiles) and the offline switch, then writes `config.json`.
+  **Refresh from FiscalStack** provisions the ZIMRA
   device, key, tax buckets and counters and shows the result (device, serial, fiscal day,
   counters, key source). Printing changes apply on the next receipt; restart the app after
-  changing the endpoint, API key, or offline signing. The private key itself is cached under
+  changing the endpoint, API key, or offline signing, and after applying a parsing profile.
+  The private key itself is cached under
   `data/state`, never written to `config.json`.
 - **Start with Windows** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it
   applies to the user who ticks it, not to all users.
@@ -242,18 +348,72 @@ per-till `company` block only needs values for a till that has never reached Fis
 | `a4` | Full-page invoice on `printing.a4PrinterName`, with `printing.printerName` as fallback. |
 | `auto` | A4 when the captured print job was a PDF, thermal otherwise. Useful when the POS prints invoices as PDF and receipts as plain text. |
 
-The A4 layout mirrors FiscalBridge's **Modern Blue** template: header with the company logo,
-verification code + verify URL and the ZIMRA QR; title (`FISCAL TAX INVOICE`, `CREDIT NOTE`,
-`DEBIT NOTE`); seller and buyer cards; a fiscal grid with invoice/counter, fiscal day, date,
-device ID and serial; an accent-headed item table with VAT per line and zebra rows; tax
-analysis and totals; notes and footer. Long invoices paginate with a repeated table header.
-It is drawn directly through the Windows printer driver (GDI), so it prints silently from
-the service — no browser, WebView or PDF toolchain is required, and no PDF file is produced.
+The A4 layout is a GDI port of FiscalBridge's own invoice template
+(`client/src/components/invoices/pdf-document.tsx`), so the printed page and the PDF the POS
+offers for download are the same document: 24 pt page padding, logo left / verification code
+centre / ZIMRA QR right above a hairline rule, title with the accent bar and the
+`ZIMRA fiscal document` strap, 48 % seller and buyer cards, the fiscal grid with its 3 pt
+accent spine (invoice number = the fiscal receipt number `counter/global`, the POS's own
+number on the customer reference line), an accent-headed item table with VAT per line and
+zebra rows, tax analysis beside the totals card, notes and footer. Long invoices paginate
+with a repeated header.
+Every spacing, font size and colour comes from that stylesheet, and 1 pt values are converted
+to the driver's 1/100-inch units; Arial stands in for the embedded Helvetica because it is the
+metric twin that is guaranteed to exist on Windows. It is drawn directly through the Windows
+printer driver, so it prints silently from the service — no browser, WebView or PDF toolchain
+is required, and no PDF file is produced.
 `parse.vatFlag = "0"` switches the table to exclusive-VAT columns (`Amount (excl.)`).
 
 The captured POS text is the source of the line items; the API response supplies totals,
 taxes and fiscal fields. Buyer name/TIN/VAT prefer the registered buyer returned by
 FiscalStack and fall back to what the POS printed.
+
+## Print the POS's own invoice
+
+`printing.template` decides what the customer is handed:
+
+| Value | Behaviour |
+| --- | --- |
+| `fiscal` (default) | This app's own receipt/invoice layout, rendered from the fiscal response. |
+| `original` | The POS's captured job goes to paper unchanged and the fiscal proof is stamped onto it. |
+
+With `original` there is no second template to keep in step with the POS — the shop's own
+document carries the ZIMRA proof:
+
+- **Thermal** — the captured bytes are replayed to `printing.printerName` as a RAW spool job,
+  so the till prints exactly what the POS told it to (its own code page, density and
+  formatting), and the fiscal stamp is printed straight after on the same roll.
+- **A4** — the job is rasterised with Ghostscript at 150 dpi and printed through the Windows
+  driver, with the stamp drawn under the last page's image. The page is scaled down when the
+  POS filled it to the bottom, so the proof is never cut off.
+
+The stamp is the same block on both, and it carries only what the POS could not know when it
+printed the document — the six ZIMRA identifiers, in the same order the invoice's own fiscal
+grid uses them:
+
+| Label | Value |
+| --- | --- |
+| `Invoice No` | the fiscal receipt number as `day-counter/global-number`; falls back to the top-level receipt number FiscalStack returns, then to the POS's number |
+| `Date` | issue date, without the time |
+| `Customer Reference No` | the POS's own invoice number, e.g. `INV-002` |
+| `Fiscal Device ID` | tenant device the receipt was signed under |
+| `Fiscal Day No` | open fiscal day |
+| `Device Serial No` | provisioned device serial |
+
+The QR code and the verification URL print under those lines. Totals are not repeated — they
+are already on the invoice the stamp sits on. If the response carried no QR, the fiscal code
+is printed as text so the proof stays verifiable by hand. An operator reprint is headed
+`FISCAL PROOF - DUPLICATE COPY`. The fiscal templates use the same invoice-number rule: the
+receipt number ZIMRA quotes is the invoice number, and the POS's own number is the customer
+reference.
+
+`original` requires `storage.retainJobs = true`: the stamp is printed from the bytes saved
+under `data/jobs/<date>/original/<hash>.{pdf,ps,bin}`, and the path is stored in the job's
+print snapshot so a reprint finds its own document again. If the fiscal document is already
+issued but the stamped copy cannot be produced — retention was off, the file aged out, or the
+replay/raster failed — the job falls back to the `fiscal` template and the log says so, rather
+than leaving the customer with nothing. `config.json` validation rejects
+`"template": "original"` together with `"retainJobs": false` so this cannot be set up silently.
 
 ## 4. Install as a service
 
@@ -384,6 +544,33 @@ sync" under the title and in the footer. If the server later accepts it, the fis
 in FiscalStack is the definitive one; reprint from there when a customer needs the final
 fiscal copy.
 
+## The fiscalisation request
+
+`POST {apiEndpoint}fiscalize` with `X-API-Key` is a pass-through: the key is the tenant, so
+no company id is sent, and totals, tax ids, HS codes, counters and hashes are computed
+server-side. The route validates the body with a strict schema, which decides two rules for
+everything built from receipt text — a field is sent as one of its enum values or left off,
+and a field with no value is absent rather than `null`, because an explicit `null` is a
+validation error that rejects the whole sale.
+
+| Field | Sent | When the till text does not map |
+| --- | --- | --- |
+| `date` | `yyyy-MM-dd` from the printed date | Omitted; the gateway uses its own day |
+| `currency` | `USD`, `ZWG` for ZWL/RTGS, `LSL` for loti | Omitted; the gateway issues the receipt in the company's own currency |
+| `paymentMethod` | `CASH` / `CARD` / `MOBILE` / `TRANSFER` | Omitted; defaults to `CASH` |
+| `transactionType` | `FiscalInvoice` / `CreditNote` / `DebitNote` | Omitted; defaults to `FiscalInvoice` |
+| `items[].taxType` | `STANDARD` / `ZERO_RATED` / `EXEMPT` | Omitted; defaults to `STANDARD` |
+| `items[].quantity`, `unitPrice` | Absolute values | The gateway signs corrections from `transactionType` and rejects a negative price |
+| `buyer` | Only when a TIN of exactly 10 digits was printed | Left off entirely — ZIMRA receives a buyer against a TIN, and a name-only block is rejected. A VAT number that is not 9 digits, an email the gateway cannot parse, or a phone over 20 characters is dropped on its own |
+| `invoiceNumber` | Always, when the POS printed one, so a blind retry returns `409 DUPLICATE_INVOICE` instead of minting a second receipt | Omitted when no number was printed; the gateway generates one |
+
+A rejection is reported with the gateway's error code, its per-field complaints and its hint,
+so `Rejected` in the jobs list says which line to fix (`VALIDATION_ERROR: Invalid request
+body [paymentMethod: Invalid enum value. Expected 'CASH' | 'CARD' | 'MOBILE' | 'TRANSFER', received 'PayNow'] — …`).
+
+The `offline*` fields on a queued receipt are ours, not the schema's: the gateway ignores
+them and assigns the next ZIMRA counters when it processes the sync.
+
 ## Duplicate protection
 
 Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately strict:
@@ -403,7 +590,8 @@ Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately
 
 | Situation | Result |
 | --- | --- |
-| No line items, totals mismatch, credit note without a reference, no API key | `NeedsReview` — nothing is sent |
+| No line items, totals mismatch, non-positive parsed total, no API key | `NeedsReview` — nothing is sent |
+| Credit note or debit note without an original invoice reference | `Rejected` by the gateway's early field check; the correction is never stored, so it can be re-sent once the reference is on the document |
 | API returns 4xx or `success=false` | `Rejected` — job is not retried automatically |
 | Timeout, connection failure, 5xx, unreadable 2xx | `AmbiguousFailure` — **never retried automatically**, because the receipt may already exist at ZIMRA |
 | API unreachable and `offline.enabled` | Signed offline, queued and printed; retried only by the sync loop |
@@ -432,22 +620,41 @@ reconcile the queue first.
   times out mid-flight stays `AmbiguousFailure` and is not re-issued offline.
 - Discounts, rounding lines and non-item charges are not modelled. A receipt whose printed
   total differs from its item total is held for review rather than fiscalised incorrectly.
+- The pass-through route takes any ISO 4217 code and defaults to the company's own
+  currency, so an RSL till whose receipts print LSL is fiscalised in loti. Currency is
+  sent only when the till text names a code the factory recognises; anything else is
+  left off rather than guessed.
 - Invoice numbers come from the receipt text. If the POS does not print one, dedup falls
   back to the text hash; configure `parse.invoiceNumber` where possible.
-- Buyer VAT/TIN are forwarded exactly as printed. No digit-length or country rules are
-  applied locally; the API validates them for the tenant's authority.
+- A [parsing profile](#parsing-profiles) changes only where text is found: a layout whose
+  lines do not add up is still held for review, not fiscalised from a best guess. Applying
+  one takes effect at the next restart, and the profile controls in Settings are WinForms
+  code authored on a Linux host — click through *Use this profile*, *Import…* and
+  *Save current rules as…* once on a Windows till.
+- Buyer details reach ZIMRA only when the receipt text carried a 10-digit TIN; identifiers the
+  gateway's schema rejects are dropped instead of sent, so a malformed VAT number disappears
+  from the fiscal receipt rather than failing the sale. See
+  [The fiscalisation request](#the-fiscalisation-request).
 - One instance captures one printer/tenant/device. Run one service per till.
 - Tested for parsing and ledger behaviour with `dotnet test`. The Windows printer driver,
   Ghostscript invocation and service install must be verified on a Windows till.
 - The packaged installer and Authenticode signing scripts are authored for Windows and
   have not been executed on the Linux build host. Run the checklist in
   [`packaging/README.md`](packaging/README.md) once per release on a Windows agent.
-- A4 invoices are rendered with GDI, not from FiscalBridge's HTML. The layout mirrors the
-  Modern Blue template but fonts and spacing can differ slightly by driver, and no PDF
-  copy is saved; FiscalStack remains the source for archived fiscal documents.
+- `printing.template = "original"` replays the POS's own bytes; it cannot re-render them. A
+  till whose driver rejects a RAW job, or an A4 job Ghostscript cannot rasterise, falls back
+  to the fiscal template, so the proof is always printed even when the shop's layout is not.
+- A4 invoices are rendered with GDI, not from FiscalBridge's HTML. The geometry is taken from
+  the invoice template's stylesheet, but the driver substitutes its own metrics for Arial and
+  rounds to its own dot grid, so a printed page can differ from the PDF by a fraction of a
+  millimetre. No PDF copy is saved; FiscalStack remains the source for archived fiscal
+  documents.
 
 ## Licensing note
 
-Ghostscript is AGPL-licensed. If you distribute this application with Ghostscript bundled,
-review the AGPL obligations (or install Ghostscript separately on the till). The
-`Generic / Text Only` capture path does not need Ghostscript.
+Ghostscript is AGPL-licensed. The release can ship it inside the package
+(`packaging/build-release.ps1 -GhostscriptDir`); doing so obliges you to carry its licence
+text and the corresponding source, or to hold a commercial licence from Artifex. Review
+that before producing a bundled package — installing Ghostscript on the till separately
+avoids the question, and the `Generic / Text Only` capture path does not need Ghostscript
+at all.

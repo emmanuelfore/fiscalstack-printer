@@ -200,6 +200,51 @@ public sealed class FiscalDeviceClientTests : IDisposable
         Assert.NotNull(result.Error);
     }
 
+    [Fact]
+    public async Task ValidationRejectionNamesTheFieldsThatFailed()
+    {
+        // A bare "Invalid request body" tells the operator nothing; the schema's
+        // per-field complaints are the only actionable part of a 400.
+        using var client = Client(Start(_ => Json(400, """
+            {
+              "error": "VALIDATION_ERROR",
+              "message": "Invalid request body",
+              "statusCode": 400,
+              "details": [
+                { "field": "currency", "message": "Invalid enum value. Expected 'USD' | 'ZWG', received 'LSL'" },
+                { "field": "items.0.quantity", "message": "Quantity must be greater than 0" }
+              ]
+            }
+            """)));
+
+        var outcome = await client.FiscaliseAsync(new FiscalizeRequest { InvoiceNumber = "INV-1" }, CancellationToken.None);
+
+        Assert.Equal(FiscalizeOutcomeStatus.Rejected, outcome.Status);
+        Assert.Equal(400, outcome.HttpStatus);
+        Assert.Contains("VALIDATION_ERROR", outcome.Error);
+        Assert.Contains("currency: Invalid enum value", outcome.Error);
+        Assert.Contains("items.0.quantity: Quantity must be greater than 0", outcome.Error);
+    }
+
+    [Fact]
+    public async Task FiscalizationFailureCarriesTheGatewaysHint()
+    {
+        using var client = Client(Start(_ => Json(422, """
+            {
+              "error": "FISCALIZATION_FAILED",
+              "message": "Fiscal day is not open",
+              "statusCode": 422,
+              "hint": "Ensure your ZIMRA device is registered and the fiscal day is open."
+            }
+            """)));
+
+        var outcome = await client.FiscaliseAsync(new FiscalizeRequest { InvoiceNumber = "INV-2" }, CancellationToken.None);
+
+        Assert.Equal(FiscalizeOutcomeStatus.Rejected, outcome.Status);
+        Assert.Contains("Fiscal day is not open", outcome.Error);
+        Assert.Contains("fiscal day is open", outcome.Error);
+    }
+
     private FiscalStackClient Client(int port) => new(
         new InterceptorConfig
         {

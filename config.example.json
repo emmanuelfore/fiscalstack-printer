@@ -24,16 +24,18 @@
   "printing": {
     "enabled": true,
     "format": "thermal",
+    "template": "fiscal",
     "printerName": "EPSON TM-T20III Receipt",
     "a4PrinterName": "",
     "paperWidthMm": 80,
     "copies": 1,
     "retryCount": 2,
-    "accentColor": "#2563EB",
+    "accentColor": "#4F46E5",
     "footerText": "Thank you for your business!"
   },
 
   "parse": {
+    "profile": "sage",
     "productStartLine": "Order No.",
     "productEndLine": "Items count",
     "invoiceNumber": "Order No.",
@@ -54,7 +56,54 @@
     "vatFlag": "1",
     "vatRate": 0.15,
     "taxSymbol": "",
-    "nonTaxSymbol": ""
+    "nonTaxSymbol": "",
+
+    "//layout": "Everything below is a parsing profile's vocabulary: where the text is looked for. 'profile' only records which profile was applied - the rules themselves live here, so this file stays the single source of truth. Picking a profile in Settings rewrites these keys; see profiles/sage.json for every field, including the optional 'patterns' (regex overrides) and 'limits' (tolerances), which default to the built-in values when omitted.",
+    "dateLabels": ["Date", "Dated"],
+    "dateFormats": [
+      "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy",
+      "dd-MM-yyyy HH:mm:ss", "dd-MM-yyyy HH:mm", "dd-MM-yyyy",
+      "yyyy-MM-dd HH:mm:ss", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd",
+      "dd MMM yyyy HH:mm", "dd MMM yyyy"
+    ],
+    "vatNumberLabels": ["Customer VAT", "Buyer VAT", "Client VAT"],
+    "tinLabels": ["Customer TIN", "Buyer TIN", "Client TIN"],
+    "phoneLabels": ["Phone", "Tel"],
+    "addressLabels": ["Address"],
+    "buyerNameLiterals": ["Cash Customer", "Walk-in Customer", "Walk in Customer"],
+    "invoiceNumberKeywords": ["Invoice", "Order", "Receipt", "INV"],
+    "buyerNameKeywords": ["Buyer", "Customer", "Client"],
+    "nonItemKeywords": [
+      "total", "subtotal", "sub total", "tax", "vat", "balance", "change",
+      "tendered", "paid", "payment", "discount", "rounding", "items count",
+      "order no", "invoice"
+    ],
+    "itemTableHeaderRequires": ["DESCRIPTION", "QUANTITY"],
+    "itemTableHeaderAnyOf": ["EXCLUSIVETOTAL", "INCLUSIVETOTAL", "EXCLTOTAL", "INCLTOTAL"],
+    "itemTableEndMarkers": [
+      "banking details", "total", "sub total", "grand total", "balance due",
+      "payment", "terms", "thank you"
+    ],
+
+    "//tax": "How the parser learns each line's VAT status. A line is read as STANDARD, ZERO_RATED or EXEMPT - the buckets the gateway maps onto ZIMRA tax IDs - from a marker printed in one of three windows: 'slot' (a code after the amount, or glued to it), 'annotation' (a bracketed note on the line) or 'section' (a header naming the items below it). Rules are tried in order and the first match wins; the longest marker beats a shorter one, so NON-VAT wins over the VAT inside it. A line with no marker uses defaultTaxType and the sale is never held. The product name is never searched, so 'Zero Sugar Coke' stays taxable. A marker made only of figures is rejected.",
+    "defaultTaxType": "STANDARD",
+    "taxRules": [
+      {
+        "taxType": "EXEMPT",
+        "markers": ["EXEMPT", "EX", "NO VAT", "NON-VAT", "NOT VATABLE", "C"],
+        "where": ["slot", "annotation", "section"]
+      },
+      {
+        "taxType": "ZERO_RATED",
+        "markers": ["ZERO", "ZERO RATED", "ZR", "B"],
+        "where": ["slot", "annotation", "section"]
+      },
+      {
+        "taxType": "STANDARD",
+        "markers": ["VAT", "STANDARD", "STD", "A"],
+        "where": ["slot", "annotation"]
+      }
+    ]
   },
 
   "storage": {

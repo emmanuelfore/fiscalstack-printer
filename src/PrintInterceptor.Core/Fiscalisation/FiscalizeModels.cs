@@ -2,6 +2,11 @@ using System.Text.Json.Serialization;
 
 namespace PrintInterceptor.Core.Fiscalisation;
 
+/// <summary>
+/// The pass-through body. Every optional field is nullable so it can be omitted:
+/// the gateway's schema defaults are applied only when a key is absent, and an
+/// explicit null is a validation error that rejects the whole sale.
+/// </summary>
 public sealed class FiscalizeRequest
 {
     [JsonPropertyName("items")]
@@ -13,17 +18,18 @@ public sealed class FiscalizeRequest
     [JsonPropertyName("invoiceNumber")]
     public string? InvoiceNumber { get; set; }
 
+    /// <summary>Calendar date as "yyyy-MM-dd"; absent means the gateway uses today.</summary>
     [JsonPropertyName("date")]
     public string? Date { get; set; }
 
     [JsonPropertyName("currency")]
-    public string Currency { get; set; } = "USD";
+    public string? Currency { get; set; }
 
     [JsonPropertyName("paymentMethod")]
-    public string PaymentMethod { get; set; } = "CASH";
+    public string? PaymentMethod { get; set; }
 
     [JsonPropertyName("transactionType")]
-    public string TransactionType { get; set; } = "FiscalInvoice";
+    public string? TransactionType { get; set; }
 
     [JsonPropertyName("relatedInvoiceNumber")]
     public string? RelatedInvoiceNumber { get; set; }
@@ -58,17 +64,22 @@ public sealed class FiscalizeItem
     [JsonPropertyName("quantity")]
     public decimal Quantity { get; set; }
 
+    /// <summary>Always positive: the gateway signs corrections from transactionType.</summary>
     [JsonPropertyName("unitPrice")]
     public decimal UnitPrice { get; set; }
 
     [JsonPropertyName("taxType")]
-    public string TaxType { get; set; } = "STANDARD";
+    public string? TaxType { get; set; }
 
     /// <summary>True when unitPrice already contains VAT (VatFlag = 1).</summary>
     [JsonPropertyName("taxInclusive")]
-    public bool TaxInclusive { get; set; } = true;
+    public bool TaxInclusive { get; set; }
 }
 
+/// <summary>
+/// Only filled with values the gateway's schema accepts: TIN is exactly 10 digits,
+/// VAT number exactly 9, email at most 100, phone at most 20.
+/// </summary>
 public sealed class FiscalizeBuyer
 {
     [JsonPropertyName("registeredName")]

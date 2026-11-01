@@ -3,6 +3,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
 using System.Drawing.Text;
 using System.Globalization;
+using PrintInterceptor.Core.Configuration;
 using PrintInterceptor.Core.Diagnostics;
 using PrintInterceptor.Core.Printing;
 
@@ -15,14 +16,32 @@ namespace PrintInterceptor;
 public sealed class WindowsGdiReceiptPrinter : IReceiptPrinter
 {
     private readonly ILog _log;
+    private readonly OriginalInvoicePrinter _original;
 
-    public WindowsGdiReceiptPrinter(ILog log)
+    public WindowsGdiReceiptPrinter(InterceptorConfig config, ILog log)
     {
         _log = log;
+        _original = new OriginalInvoicePrinter(config, log);
     }
 
     public void Print(ReceiptPrintModel model)
     {
+        if (model.Template == PrintTemplate.Original && !string.IsNullOrWhiteSpace(model.OriginalJobPath))
+        {
+            try
+            {
+                _original.Print(model);
+                return;
+            }
+            catch (Exception ex)
+            {
+                // The receipt is already fiscalised at this point, so the customer still
+                // has to leave with a fiscal document: fall back to this app's own layout.
+                _log.Warn(
+                    $"The POS's invoice could not be stamped ({ex.Message}); printing the fiscal template instead.");
+            }
+        }
+
         if (model.Format == PrintFormat.A4)
         {
             A4InvoicePrinter.Print(model, _log);
@@ -220,7 +239,16 @@ public sealed class WindowsGdiReceiptPrinter : IReceiptPrinter
             g.DrawLine(_accentPen, _margin, y, _margin + _usable, y);
             y += 8;
 
-            y = DrawKeyValue(g, "Invoice", _model.InvoiceNumber, y, bold: true);
+            // ZIMRA quotes the fiscal receipt number as the invoice number; the POS's own
+            // document number stays on the receipt as the customer reference.
+            var fiscalInvoice = FiscalStamp.InvoiceNumber(_model);
+            y = DrawKeyValue(g, "Invoice", fiscalInvoice, y, bold: true);
+            if (!string.IsNullOrWhiteSpace(_model.InvoiceNumber) &&
+                !string.Equals(_model.InvoiceNumber, fiscalInvoice, StringComparison.Ordinal))
+            {
+                y = DrawKeyValue(g, "Ref", _model.InvoiceNumber, y);
+            }
+
             y = DrawKeyValue(g, "Date", _model.DateText, y);
 
             if (!string.IsNullOrWhiteSpace(_model.BuyerName))
@@ -323,10 +351,9 @@ public sealed class WindowsGdiReceiptPrinter : IReceiptPrinter
             }
 
             var counters = new List<string>();
-            if (_model.ReceiptNumber is not null) counters.Add($"Receipt: {_model.ReceiptNumber}");
-            if (_model.FiscalDayNo is not null) counters.Add($"Day: {_model.FiscalDayNo}");
-            if (_model.ReceiptCounter is not null) counters.Add($"Counter: {_model.ReceiptCounter}");
-            if (_model.ReceiptGlobalNo is not null) counters.Add($"Global: {_model.ReceiptGlobalNo}");
+            if (_model.FiscalDayNo is not null) counters.Add($"Fiscal day: {_model.FiscalDayNo}");
+            if (!string.IsNullOrWhiteSpace(_model.DeviceId)) counters.Add($"Device: {_model.DeviceId}");
+            if (!string.IsNullOrWhiteSpace(_model.DeviceSerialNo)) counters.Add($"Serial: {_model.DeviceSerialNo}");
 
             if (counters.Count > 0)
             {

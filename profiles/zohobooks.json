@@ -1,0 +1,31 @@
+{
+  "name": "zohobooks",
+  "title": "Zoho Books tax invoice",
+  "version": "1",
+  "description": "Zoho Books PDF invoices. The document number is labelled NUMBER instead of Order No., the buyer's VAT number is Customer VAT No, and the date can be printed as Invoice Date. The item table itself is the same collapsed layout Sage uses (Description / Quantity / Excl. Price / Disc % / VAT % / Excl. Total / Incl. Total), so nothing else needs restating: a profile lists only what differs from the built-in rules. Tax is the same too: a line with 0% in the VAT % column and no code is read as ZERO_RATED, and a 0% figure cannot tell a zero-rated supply from an exempt one, so an exempt line needs the code Zoho prints on it added to parse.taxRules.",
+  "rules": {
+    "invoiceNumber": "Number",
+    "vatNumberLabels": [
+      "Customer VAT No",
+      "Customer VAT",
+      "Buyer VAT",
+      "Client VAT"
+    ],
+    "dateLabels": [
+      "Date",
+      "Invoice Date",
+      "Dated"
+    ],
+    "itemTableEndMarkers": [
+      "banking details",
+      "total",
+      "sub total",
+      "grand total",
+      "balance due",
+      "payment",
+      "terms",
+      "notes",
+      "thank you"
+    ]
+  }
+}

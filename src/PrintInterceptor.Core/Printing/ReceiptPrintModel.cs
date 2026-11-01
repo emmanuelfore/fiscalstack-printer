@@ -8,6 +8,17 @@ public enum PrintFormat
     A4
 }
 
+/// <summary>
+/// Which layout the customer copy uses. <see cref="Fiscal"/> is this app's own
+/// rendering; <see cref="Original"/> prints the POS's captured job and stamps the
+/// fiscal proof onto it.
+/// </summary>
+public enum PrintTemplate
+{
+    Fiscal,
+    Original
+}
+
 public sealed record ReceiptPrintLine(
     string Name,
     decimal Quantity,
@@ -78,9 +89,18 @@ public sealed class ReceiptPrintModel
 
     public string PrinterName { get; init; } = "";
     public string A4PrinterName { get; init; } = "";
+
+    public PrintTemplate Template { get; init; } = PrintTemplate.Fiscal;
+
+    /// <summary>
+    /// Stored copy of the bytes the POS sent, used when <see cref="Template"/> is
+    /// <see cref="PrintTemplate.Original"/>. Null when the job could not be retained,
+    /// in which case the fiscal template is printed instead.
+    /// </summary>
+    public string? OriginalJobPath { get; init; }
     public int PaperWidthMm { get; init; } = 80;
     public int Copies { get; init; } = 1;
-    public string AccentColor { get; init; } = "#2563EB";
+    public string AccentColor { get; init; } = "#4F46E5";
     public string FooterText { get; init; } = "Thank you for your business!";
 
     /// <summary>A4 invoices go to their own printer; the receipt printer is the fallback.</summary>

@@ -29,6 +29,16 @@ public sealed class FiscalStackClient : IDisposable
         NumberHandling = JsonNumberHandling.AllowReadingFromString
     };
 
+    /// <summary>
+    /// A field the gateway does not know about is treated as absent, but an explicit
+    /// null fails validation and rejects the sale. Unset optionals are therefore left
+    /// off the wire rather than sent as null.
+    /// </summary>
+    public static readonly JsonSerializerOptions RequestJsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     private readonly HttpClient _http;
     private readonly HttpClient _probeHttp;
     private readonly HttpClient _fileHttp;
@@ -565,7 +575,7 @@ public sealed class FiscalStackClient : IDisposable
         string requestJson;
         try
         {
-            requestJson = JsonSerializer.Serialize(request, JsonOptions);
+            requestJson = JsonSerializer.Serialize(request, RequestJsonOptions);
         }
         catch (Exception ex)
         {
@@ -584,11 +594,8 @@ public sealed class FiscalStackClient : IDisposable
 
             if (!response.IsSuccessStatusCode)
             {
-                var message = ExtractMessage(body) ?? $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
-                var excerpt = DescribeBody(body);
-                var detail = string.Equals(message, excerpt, StringComparison.Ordinal)
-                    ? message
-                    : $"{message} | body: {excerpt}";
+                var composed = ComposeRejection(body);
+                var detail = composed ?? ExtractMessage(body) ?? $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
 
                 if ((int)response.StatusCode >= 500)
                 {
@@ -661,17 +668,6 @@ public sealed class FiscalStackClient : IDisposable
         _actionHttp.Dispose();
     }
 
-    private static string DescribeBody(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body))
-        {
-            return "<empty response>";
-        }
-
-        var trimmed = body.Trim();
-        return trimmed.Length <= 500 ? trimmed : trimmed[..500] + "…";
-    }
-
     /// <summary>
     /// A short, safe one-line summary of what we sent, so a rejected job can be
     /// diagnosed from the log without shipping the full payload. Buyer personal
@@ -722,6 +718,100 @@ public sealed class FiscalStackClient : IDisposable
 
     private static string Truncate(string? value, int max) =>
         string.IsNullOrEmpty(value) ? "-" : (value.Length <= max ? value : value[..max] + "…");
+
+    /// <summary>
+    /// One actionable line for a declined job. The gateway reports the failing
+    /// fields in details[] and the fix in hint[], and the error code is what tells a
+    /// duplicate apart from a bad item, so all three are folded together. Returns
+    /// null when the body carries nothing structured, leaving the caller to quote it.
+    /// </summary>
+    private static string? ComposeRejection(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var code = StringOf(root, "error");
+            var message = StringOf(root, "message") ?? StringOf(root, "detail");
+            var fields = FieldIssues(root);
+            var hint = StringOf(root, "hint");
+
+            var head = code is null || string.Equals(code, message, StringComparison.Ordinal)
+                ? message
+                : message is null ? code : $"{code}: {message}";
+
+            if (head is null && fields.Count == 0 && hint is null)
+            {
+                return null;
+            }
+
+            var line = head ?? "The server declined the receipt.";
+            if (fields.Count > 0)
+            {
+                line += " [" + string.Join("; ", fields) + "]";
+            }
+
+            if (hint is not null)
+            {
+                line += $" — {hint}";
+            }
+
+            return line;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The schema's per-field complaints, which are the only part of a 400 that says what to fix.</summary>
+    private static List<string> FieldIssues(JsonElement root)
+    {
+        var issues = new List<string>();
+        if (!root.TryGetProperty("details", out var details) ||
+            details.ValueKind != JsonValueKind.Array)
+        {
+            return issues;
+        }
+
+        foreach (var issue in details.EnumerateArray())
+        {
+            if (issue.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var message = StringOf(issue, "message");
+            if (message is null)
+            {
+                continue;
+            }
+
+            var field = StringOf(issue, "field");
+            issues.Add(field is null ? message : $"{field}: {message}");
+            if (issues.Count == 5)
+            {
+                break;
+            }
+        }
+
+        return issues;
+    }
+
+    private static string? StringOf(JsonElement root, string property) =>
+        root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 
     private static string? ExtractMessage(string body)
     {

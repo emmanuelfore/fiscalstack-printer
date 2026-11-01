@@ -25,10 +25,24 @@ review here and must be exercised once on a Windows build agent before release.
 - Windows SDK for `signtool.exe` (or `signtool` on `PATH`) **only when signing**.
 - An Authenticode code-signing certificate: either a `.pfx` file or a
   certificate installed in the machine store with a known thumbprint.
-- Ghostscript is **not** bundled. It is needed only when the virtual printer uses
-  the PostScript driver. Ghostscript is AGPL-licensed: shipping it inside a
-  commercial installer creates obligations. The installer detects an existing
-  64-bit install and warns if it is missing; install it separately.
+- Ghostscript is needed only when the virtual printer uses the PostScript or PDF
+  driver; `Generic / Text Only` capture does not need it. Two supported ways to
+  provide it:
+  - **Bundle it** — `build-release.ps1 -GhostscriptDir C:\Program Files\gs\gs10.08.0`
+    copies `bin`, `lib` and `Resource` into `publish\ghostscript`, which the zip and
+    the setup `.exe` both ship (they copy `publish\*` recursively), so it lands at
+    `{app}\ghostscript`. `install.ps1` then writes that path into
+    `ghostscriptPath` unless `-GhostscriptPath` was given or the config already
+    points at a working install. Add `-StripGhostscriptFonts` to drop
+    `Resource\Font` and shrink the package, at the risk of substitute glyphs.
+    Ghostscript is AGPL-licensed: redistributing the binaries obliges you to carry
+    its licence text and the corresponding source, or to take a commercial licence
+    from Artifex. The build script copies any licence file it finds beside the
+    binaries; the source offer is yours to arrange.
+  - **Install it on the till** — 64-bit Ghostscript from ghostscript.com, either on
+    `PATH` or via `ghostscriptPath`. The app also probes
+    `<exe folder>\ghostscript\bin\gswin64c.exe` on its own, so a bundled copy works
+    with no config entry at all.
 
 ## Build a release
 
@@ -41,11 +55,17 @@ review here and must be exercised once on a Windows build agent before release.
 
 # Signed with a certificate from the Windows store
 .\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
+
+# Same, with Ghostscript inside the package for PostScript tills
+.\packaging\build-release.ps1 -Version 1.2.0 -GhostscriptDir "C:\Program Files\gs\gs10.08.0"
 ```
 
 Outputs (under `..\dist` by default, override with `-OutputRoot`):
 
-- `publish\` — the self-contained application plus the three install scripts.
+- `publish\` — the self-contained application plus the three install scripts and the
+  shipped `profiles\` folder (the read-only receipt layouts Settings and the tray list;
+  see [Parsing profiles](../README.md#parsing-profiles)). `ghostscript\` is added when
+  `-GhostscriptDir` was used.
 - `PrintInterceptor-<version>-win-x64.zip` — for manual/USB installs.
 - `PrintInterceptor-<version>-setup.exe` — Inno Setup installer (when available).
 
@@ -59,6 +79,9 @@ part only. Default version is the current date plus `-dev`.
   timestamp (`-TimestampUrl`, default DigiCert).
 - The setup `.exe` and its uninstaller: Inno signs them itself through
   `/Ssigntool`, so they are **not** signed a second time by the script.
+
+Bundled Ghostscript binaries keep whatever signature Artifex shipped; the script
+signs only `PrintInterceptor*.exe`.
 
 The PFX password is converted from `SecureString` only in memory and is passed to
 `signtool`/ISCC through their `/p` switches. Prefer a password-protected PFX on the
@@ -167,8 +190,18 @@ per release on a Windows machine:
 4. Print a POS receipt to the virtual printer: it is fiscalised and printed on the
    real till printer; the tray/jobs window and *Fiscal status* agree with
    FiscalBridge's Fiscal Device page.
-5. Tray mode: the Run value starts the app at sign-in for the intended user.
-6. Uninstall leaves the service, printer and Run value gone; `-Purge` also removes
+5. Parse profiles: `install.ps1` reports the profiles shipped in `{app}\profiles`,
+   Settings lists **sage** and **zohobooks**, *Use this profile* writes their rules into
+   `config.json`, and *Import…* / *Save current rules as…* round-trip a file — including
+   `parse.taxRules`, which must survive the trip unchanged. Applying one
+   needs an app/service restart before receipts are read with it.
+6. Tax markers: print a till receipt with one exempt line (a code after the amount, e.g.
+   `5.00 EX`) and one ordinary line. The fiscal receipt prints the exempt line under the
+   exemption tax ID and the other under the standard rate; the jobs window shows no warning
+   for the marked line and the *no marker* note only if the POS prints codes on some lines
+   and not others.
+7. Tray mode: the Run value starts the app at sign-in for the intended user.
+8. Uninstall leaves the service, printer and Run value gone; `-Purge` also removes
    `%ProgramData%\FiscalStack\PrintInterceptor`.
 
 ## Notes and open items

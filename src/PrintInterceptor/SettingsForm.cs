@@ -14,6 +14,7 @@ public sealed class SettingsForm : Form
     private readonly ILog _log;
     private readonly OfflineReceiptService _offline;
     private readonly SecretStore _secrets;
+    private readonly ParseProfileStore _profiles;
 
     private readonly TextBox _apiEndpoint;
     private readonly TextBox _apiKey;
@@ -21,9 +22,12 @@ public sealed class SettingsForm : Form
     private readonly Button _clearKey;
     private readonly CheckBox _printingEnabled;
     private readonly ComboBox _format;
+    private readonly ComboBox _template;
     private readonly ComboBox _printerName;
     private readonly ComboBox _a4PrinterName;
     private readonly NumericUpDown _paperWidth;
+    private readonly ComboBox _profile;
+    private readonly Label _profileNote;
     private readonly CheckBox _offlineEnabled;
     private readonly Button _refresh;
     private readonly Label _status;
@@ -95,6 +99,20 @@ public sealed class SettingsForm : Form
             _ => 0
         };
 
+        _template = new ComboBox
+        {
+            Dock = DockStyle.Left,
+            Width = 230,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _template.Items.AddRange(new object[]
+        {
+            "This app's fiscal layout",
+            "The POS's own invoice + fiscal stamp"
+        });
+        _template.SelectedIndex = string.Equals(
+            config.Printing.Template.Trim(), "original", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
         _printerName = CreatePrinterSelector(
             config.Printing.PrinterName,
             "Windows default printer");
@@ -109,6 +127,56 @@ public sealed class SettingsForm : Form
             Dock = DockStyle.Left,
             Width = 90
         };
+
+        _profiles = ParseProfileStore.ForCurrentInstall();
+        _profile = new ComboBox
+        {
+            Dock = DockStyle.Left,
+            Width = 250,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _profileNote = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(560, 0),
+            ForeColor = Color.DimGray
+        };
+
+        var profileControls = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true
+        };
+        var applyProfile = new Button { Text = "Use this profile", AutoSize = true };
+        applyProfile.Click += (_, _) => ApplySelectedProfile();
+        var importProfile = new Button { Text = "Import…", AutoSize = true };
+        importProfile.Click += (_, _) => ImportProfile();
+        var captureProfile = new Button { Text = "Save current rules as…", AutoSize = true };
+        captureProfile.Click += (_, _) => SaveCurrentRulesAsProfile();
+        var openProfiles = new Button { Text = "Open profiles folder", AutoSize = true };
+        openProfiles.Click += (_, _) => ShellOpen.Folder(_profiles.UserDirectory);
+        profileControls.Controls.Add(_profile);
+        profileControls.Controls.Add(applyProfile);
+        profileControls.Controls.Add(importProfile);
+        profileControls.Controls.Add(captureProfile);
+        profileControls.Controls.Add(openProfiles);
+
+        var profileHost = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            AutoSize = true
+        };
+        profileHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        profileHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        profileHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        profileHost.Controls.Add(profileControls, 0, 0);
+        _profileNote.Margin = new Padding(3, 6, 3, 0);
+        profileHost.Controls.Add(_profileNote, 0, 1);
+        _profile.SelectedIndexChanged += (_, _) => ShowProfileNote();
 
         _offlineEnabled = new CheckBox
         {
@@ -168,9 +236,12 @@ public sealed class SettingsForm : Form
         AddRow(table, "", Separator("Printing"));
         AddRow(table, "", _printingEnabled);
         AddRow(table, "Output format", _format);
+        AddRow(table, "Customer copy", _template);
         AddRow(table, "Receipt printer (thermal)", _printerName);
         AddRow(table, "A4 invoice printer", _a4PrinterName);
         AddRow(table, "Paper width (mm)", _paperWidth);
+        AddRow(table, "", Separator("Receipt parsing profile"));
+        AddRow(table, "Layout rules", profileHost);
         AddRow(table, "", Separator("Offline fiscalisation"));
         AddRow(table, "", _offlineEnabled);
         AddRow(table, "", _refresh);
@@ -221,6 +292,7 @@ public sealed class SettingsForm : Form
         _refresh.Enabled = _offlineEnabled.Checked;
         UpdateKeyHint();
         UpdateStatusText();
+        ReloadProfiles();
     }
 
     /// <summary>
@@ -457,6 +529,174 @@ public sealed class SettingsForm : Form
         public override string ToString() => Label;
     }
 
+    private sealed record ProfileChoice(string Value, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
+    /// <summary>
+    /// Refills the profile list from disk. <paramref name="selectName"/> is used right
+    /// after an import or a capture, so the new profile is the one on screen.
+    /// </summary>
+    private void ReloadProfiles(string? selectName = null)
+    {
+        var profiles = _profiles.List();
+        var wanted = selectName ?? _config.Parse.Profile;
+
+        _profile.Items.Clear();
+        foreach (var profile in profiles)
+        {
+            _profile.Items.Add(new ProfileChoice(
+                profile.Name,
+                profile.BuiltIn ? $"{profile.DisplayName}  (built-in)" : profile.DisplayName));
+        }
+
+        var match = _profile.Items.Cast<ProfileChoice>().FirstOrDefault(choice =>
+            string.Equals(choice.Value, wanted, StringComparison.OrdinalIgnoreCase));
+        if (match is not null)
+        {
+            _profile.SelectedItem = match;
+        }
+        else if (_profile.Items.Count > 0)
+        {
+            _profile.SelectedIndex = 0;
+        }
+
+        ShowProfileNote();
+    }
+
+    private void ShowProfileNote()
+    {
+        var lines = new List<string>();
+        if (_profiles.LoadErrors.Count > 0)
+        {
+            lines.Add("Could not read: " + string.Join("; ", _profiles.LoadErrors));
+        }
+
+        if (_profile.SelectedItem is ProfileChoice choice)
+        {
+            var profile = _profiles.Find(choice.Value);
+            if (profile is not null)
+            {
+                lines.Add(profile.Description);
+                lines.Add(profile.BuiltIn
+                    ? $"Shipped with the application, and already saved in config.json as profile '{_config.Parse.Profile}'."
+                    : $"Installed at {profile.FilePath}.");
+            }
+        }
+        else
+        {
+            lines.Add($"No profiles found. Drop a JSON profile into {_profiles.UserDirectory}, or save the rules " +
+                       "this till is using as a profile.");
+        }
+
+        _profileNote.Text = string.Join(Environment.NewLine, lines.Where(line => !string.IsNullOrWhiteSpace(line)));
+    }
+
+    /// <summary>
+    /// Writing the profile's rules into the configuration file is the whole action: the
+    /// parser reads them when the service starts, so applying is saved immediately rather
+    /// than waiting on the Save button the rest of this window uses.
+    /// </summary>
+    private void ApplySelectedProfile()
+    {
+        if (_profile.SelectedItem is not ProfileChoice choice)
+        {
+            MessageBox.Show("Pick a profile first.", "PrintInterceptor",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            var profile = _profiles.Apply(choice.Value, _config);
+            _config.Save();
+            _log.Info($"Receipt parsing now uses profile '{profile.Name}' from {profile.FilePath}; " +
+                      "the rules were written to the configuration file.");
+            MessageBox.Show(
+                $"Using '{profile.DisplayName}'. Its rules are saved in {_config.ConfigPath}.\n\n" +
+                "Restart PrintInterceptor (or the service) to parse with them; the receipts it has " +
+                "already read are unaffected.",
+                "Parsing profile applied",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"Could not apply parse profile '{choice.Value}': {ex.Message}");
+            MessageBox.Show(ex.Message, "Could not apply the profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void ImportProfile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import a receipt parse profile",
+            Filter = "Parse profile (*.json)|*.json|All files (*.*)|*.*"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            var installed = _profiles.Import(dialog.FileName);
+            ReloadProfiles(Path.GetFileNameWithoutExtension(installed));
+            _log.Info($"Imported parse profile to {installed}.");
+            MessageBox.Show(
+                $"Installed {Path.GetFileName(installed)}.\n\n" +
+                "Press 'Use this profile' to take its rules into the configuration.",
+                "Parse profile imported",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            _log.Warn($"A parse profile could not be imported: {ex.Message}");
+            MessageBox.Show(ex.Message, "Could not import the profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// Captures the rules this till is parsing with today, which is how a layout worked
+    /// out at one till becomes a file another till imports. The file name becomes the
+    /// profile name, so it is checked by the same rules as any imported profile.
+    /// </summary>
+    private void SaveCurrentRulesAsProfile()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Save this till's parsing rules as a profile",
+            Filter = "Parse profile (*.json)|*.json",
+            InitialDirectory = _profiles.UserDirectory,
+            FileName = (string.IsNullOrWhiteSpace(_config.Parse.Profile) ? "my-pos" : _config.Parse.Profile) + ".json"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            var name = Path.GetFileNameWithoutExtension(dialog.FileName);
+            var saved = _profiles.Save(ParseProfileStore.Capture(name, name, _config.Parse));
+            ReloadProfiles(name);
+            _log.Info($"Saved the current parsing rules as profile '{name}' to {saved}.");
+            MessageBox.Show(
+                $"Saved to {saved}.\n\nShare that file with another till and import it there.",
+                "Profile saved",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            _log.Warn($"The current parsing rules could not be saved as a profile: {ex.Message}");
+            MessageBox.Show(ex.Message, "Could not save the profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private static Label Separator(string text) => new()
     {
         Text = text,
@@ -556,6 +796,14 @@ public sealed class SettingsForm : Form
             2 => "auto",
             _ => "thermal"
         };
+        _config.Printing.Template = _template.SelectedIndex == 1 ? "original" : "fiscal";
+        // The stamped copy is printed from the captured job's own bytes, so keeping
+        // them is not optional once "the POS's own invoice" is chosen.
+        if (_config.Printing.Template == "original")
+        {
+            _config.Storage.RetainJobs = true;
+        }
+
         _config.Printing.PrinterName = ReadPrinterSelection(_printerName);
         _config.Printing.A4PrinterName = ReadPrinterSelection(_a4PrinterName);
         _config.Printing.PaperWidthMm = (int)_paperWidth.Value;

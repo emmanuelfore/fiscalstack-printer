@@ -74,6 +74,77 @@ public class InterceptorConfigTests
     }
 
     [Fact]
+    public void OriginalTemplateNeedsTheJobBytesItStamps()
+    {
+        var config = new InterceptorConfig
+        {
+            ApiKey = "sk_test_example",
+            Printing = new PrintingConfig { Template = "original" },
+            Storage = new StorageConfig { RetainJobs = false }
+        };
+
+        var errors = config.Validate();
+
+        Assert.Contains(errors, e => e.Contains("printing.template") && e.Contains("retainJobs"));
+    }
+
+    [Fact]
+    public void OriginalTemplateWithRetentionIsAccepted()
+    {
+        var config = new InterceptorConfig
+        {
+            ApiKey = "sk_test_example",
+            Printing = new PrintingConfig { Template = "original" }
+        };
+
+        Assert.Empty(config.Validate());
+    }
+
+    [Fact]
+    public void UnknownTemplateIsRejected()
+    {
+        var config = new InterceptorConfig
+        {
+            ApiKey = "sk_test_example",
+            Printing = new PrintingConfig { Template = "photo" }
+        };
+
+        Assert.Contains(config.Validate(), e => e.Contains("printing.template"));
+    }
+
+    [Fact]
+    public void TemplateDefaultsToFiscalAndIsNormalised()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "printinterceptor-tests-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            var created = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("fiscal", created.Printing.Template);
+
+            File.WriteAllText(path, """
+                {
+                  "apiKey": "sk_test_example",
+                  "printing": { "template": "  ORIGINAL " }
+                }
+                """);
+
+            var loaded = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("original", loaded.Printing.Template);
+            Assert.True(loaded.Storage.RetainJobs);
+            Assert.Empty(loaded.Validate());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void OfflineSigningNeedsOnlyTheApiKey()
     {
         var config = new InterceptorConfig

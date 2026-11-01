@@ -215,6 +215,19 @@ if ($null -eq $config.printing) {
 Ensure-Property $config.printing "printerName"
 Ensure-Property $config.printing "a4PrinterName"
 
+# A Ghostscript bundled into the release (build-release.ps1 -GhostscriptDir) must
+# not need operator setup. An explicit -GhostscriptPath always wins, and so does a
+# config value that still points at a working install, so a re-install keeps the
+# operator's own choice.
+if ([string]::IsNullOrWhiteSpace($GhostscriptPath)) {
+    $bundledGhostscript = Join-Path (Split-Path $exe -Parent) "ghostscript\bin\gswin64c.exe"
+    $configuredGhostscript = if ($null -eq $config.ghostscriptPath) { "" } else { [string]$config.ghostscriptPath }
+    if ((Test-Path $bundledGhostscript) -and
+        ([string]::IsNullOrWhiteSpace($configuredGhostscript) -or -not (Test-Path $configuredGhostscript))) {
+        $GhostscriptPath = $bundledGhostscript
+    }
+}
+
 $config.listenPort = $Port
 if (-not [string]::IsNullOrWhiteSpace($ApiEndpoint)) { $config.apiEndpoint = $ApiEndpoint.Trim() }
 if (-not [string]::IsNullOrWhiteSpace($GhostscriptPath)) { $config.ghostscriptPath = $GhostscriptPath.Trim() }
@@ -228,6 +241,18 @@ if (-not [string]::IsNullOrWhiteSpace($config.storage) -and
 
 Write-ConfigFile $ConfigPath $config
 Write-Host "Configuration: $ConfigPath"
+
+# The receipt layouts ship next to the executable ({app}\profiles). A package built
+# without them leaves every till with the built-in rules only and nothing to import.
+$bundledProfiles = Join-Path (Split-Path $exe -Parent) "profiles"
+if (Test-Path (Join-Path $bundledProfiles "sage.json")) {
+    $profileCount = (Get-ChildItem -Path $bundledProfiles -Filter "*.json").Count
+    Write-Host "Parse profiles: $profileCount shipped in $bundledProfiles"
+}
+else {
+    Write-Warning ("No parse profiles found in $bundledProfiles. Rebuild the release so the profiles " +
+        "folder ships with PrintInterceptor (source: profiles/ in the repository).")
+}
 
 # Keep the secret out of config.json: the app reads this variable at startup.
 if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
@@ -276,7 +301,9 @@ if ($PrinterMode -eq "PostScript") {
     }
 
     if (-not $gswin) {
-        Write-Warning "PostScript mode needs Ghostscript (AGPL). Install 64-bit Ghostscript and set ghostscriptPath in $ConfigPath."
+        Write-Warning ("PostScript mode needs Ghostscript (AGPL) and none was found. Install 64-bit " +
+            "Ghostscript and set ghostscriptPath in $ConfigPath, pass -GhostscriptPath here, or build the " +
+            "release with -GhostscriptDir so it ships in the package.")
     }
     else {
         Write-Host "Ghostscript: $gswin"

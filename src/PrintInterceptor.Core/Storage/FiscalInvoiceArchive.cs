@@ -23,6 +23,11 @@ public sealed class FiscalInvoiceArchive
         Converters = { new JsonStringEnumConverter() }
     };
 
+    // The fixed Windows set, not Path.GetInvalidFileNameChars(): a ledger written on
+    // another host still has to open on the till that it is copied to.
+    private static readonly IReadOnlySet<char> InvalidFileNameChars =
+        new HashSet<char> { '<', '>', ':', '"', '/', '\\', '|', '?', '*' };
+
     private readonly string _root;
     private readonly ILog _log;
 
@@ -161,9 +166,8 @@ public sealed class FiscalInvoiceArchive
 
     private static string SafeFilePart(string value)
     {
-        var invalid = Path.GetInvalidFileNameChars();
         var cleaned = new string((string.IsNullOrWhiteSpace(value) ? "receipt" : value.Trim())
-            .Select(character => invalid.Contains(character) || char.IsControl(character) ? '_' : character)
+            .Select(character => InvalidFileNameChars.Contains(character) || char.IsControl(character) ? '_' : character)
             .ToArray());
         return cleaned.Length <= 60 ? cleaned : cleaned[..60];
     }

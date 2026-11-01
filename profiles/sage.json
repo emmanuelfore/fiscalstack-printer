@@ -1,0 +1,172 @@
+{
+  "name": "sage",
+  "title": "Sage (built-in rule set)",
+  "description": "The layout PrintInterceptor shipped before profiles existed: thermal POS markers 'Order No.' and 'Items count', the Sage/Zoho Books collapsed invoice table, two-line fiscal register items, and loti amounts printed as M1 234.56. Every value below is also the built-in default, so a new profile only has to state the lines it changes. taxRules is the VAT vocabulary a line is read with: a code after the amount, a bracketed note, or a header over a block of items - never the product description, which is why 'Zero Sugar Coke' stays taxable.",
+  "version": "1",
+  "rules": {
+    "productStartLine": "Order No.",
+    "productEndLine": "Items count",
+    "invoiceNumber": "Order No.",
+    "customerName": "Buyer Name",
+    "customerAddress": "Buyer Address",
+    "customerTIN": "Buyer TIN",
+    "customerVATNumber": "Buyer VAT",
+    "customerTelephoneNumber": "Buyer Phone",
+    "dateLabels": [
+      "Date",
+      "Dated"
+    ],
+    "dateFormats": [
+      "dd/MM/yyyy HH:mm:ss",
+      "dd/MM/yyyy HH:mm",
+      "dd/MM/yyyy",
+      "dd-MM-yyyy HH:mm:ss",
+      "dd-MM-yyyy HH:mm",
+      "dd-MM-yyyy",
+      "yyyy-MM-dd HH:mm:ss",
+      "yyyy-MM-ddTHH:mm:ss",
+      "yyyy-MM-dd HH:mm",
+      "yyyy-MM-dd",
+      "dd MMM yyyy HH:mm",
+      "dd MMM yyyy"
+    ],
+    "vatNumberLabels": [
+      "Customer VAT",
+      "Buyer VAT",
+      "Client VAT"
+    ],
+    "tinLabels": [
+      "Customer TIN",
+      "Buyer TIN",
+      "Client TIN"
+    ],
+    "phoneLabels": [
+      "Phone",
+      "Tel"
+    ],
+    "addressLabels": [
+      "Address"
+    ],
+    "buyerNameLiterals": [
+      "Cash Customer",
+      "Walk-in Customer",
+      "Walk in Customer"
+    ],
+    "invoiceNumberKeywords": [
+      "Invoice",
+      "Order",
+      "Receipt",
+      "INV"
+    ],
+    "buyerNameKeywords": [
+      "Buyer",
+      "Customer",
+      "Client"
+    ],
+    "nonItemKeywords": [
+      "total",
+      "subtotal",
+      "sub total",
+      "tax",
+      "vat",
+      "balance",
+      "change",
+      "tendered",
+      "paid",
+      "payment",
+      "discount",
+      "rounding",
+      "items count",
+      "order no",
+      "invoice"
+    ],
+    "itemTableHeaderRequires": [
+      "DESCRIPTION",
+      "QUANTITY"
+    ],
+    "itemTableHeaderAnyOf": [
+      "EXCLUSIVETOTAL",
+      "INCLUSIVETOTAL",
+      "EXCLTOTAL",
+      "INCLTOTAL"
+    ],
+    "itemTableEndMarkers": [
+      "banking details",
+      "total",
+      "sub total",
+      "grand total",
+      "balance due",
+      "payment",
+      "terms",
+      "thank you"
+    ],
+    "defaultTaxType": "STANDARD",
+    "taxRules": [
+      {
+        "taxType": "EXEMPT",
+        "markers": [
+          "EXEMPT",
+          "EX",
+          "NO VAT",
+          "NON-VAT",
+          "NOT VATABLE",
+          "C"
+        ],
+        "where": [
+          "slot",
+          "annotation",
+          "section"
+        ]
+      },
+      {
+        "taxType": "ZERO_RATED",
+        "markers": [
+          "ZERO",
+          "ZERO RATED",
+          "ZR",
+          "B"
+        ],
+        "where": [
+          "slot",
+          "annotation",
+          "section"
+        ]
+      },
+      {
+        "taxType": "STANDARD",
+        "markers": [
+          "VAT",
+          "STANDARD",
+          "STD",
+          "A"
+        ],
+        "where": [
+          "slot",
+          "annotation"
+        ]
+      }
+    ],
+    "patterns": {
+      "invoiceNumber": "(?i)\\b(?:invoice\\s*(?:no|number)?|order\\s*no\\.?|number)\\s*[:#\\-]?\\s*(?<value>[A-Z]{2,5}[\\-/]?\\d{3,}|\\d{4,})",
+      "invoiceRow": "^(?<name>.*?)\\s*(?<qty>\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:[A-Z]{1,3}\\s*)?(?<price>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*(?<disc>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?<vat>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?:[A-Z]{1,3}\\s*)?(?<exclusive>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)(?:\\s*(?:[A-Z]{1,3}\\s*)?(?<inclusive>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?))?(?:\\s+(?<tax>[A-Z]{1,3}))?$",
+      "twoLineQuantity": "^(?<price>[\\d,]+(?:\\.\\d+)?)\\s*[xX]\\s*(?<qty>[\\d,]+(?:\\.\\d+)?)$",
+      "twoLineNameAmount": "^(?<name>.+?)\\s*\\*?\\s*(?<amount>-?[\\d,]+\\.\\d{2})$",
+      "currencyBeforeAmount": "(?<![A-Za-z])M\\s*\\d{1,3}(?:,\\d{3})*\\.\\d{2}(?![0-9])",
+      "buyerLabel": "^(VAT|TIN|No\\.?|Name|Address|Email|Phone|Telephone)\\b",
+      "amountLine": "^[A-Z]{0,3}\\s*-?\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?$",
+      "email": "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+    },
+    "limits": {
+      "lineTolerance": 0.05,
+      "relativeTolerance": 0.02,
+      "minConfidence": 0.6,
+      "minItemTokens": 4,
+      "maxInvoiceNumberLength": 40,
+      "maxBuyerNameLength": 100,
+      "minIdentifierLength": 4,
+      "validYearFrom": 2000,
+      "validYearTo": 2100,
+      "regexTimeoutMilliseconds": 1000
+    }
+  }
+}

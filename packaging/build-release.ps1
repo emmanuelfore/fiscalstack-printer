@@ -8,6 +8,7 @@
 #   .\packaging\build-release.ps1 -Version 1.2.0
 #   .\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx
 #   .\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123456789ABCDEF...
+#   .\packaging\build-release.ps1 -Version 1.2.0 -GhostscriptDir "C:\Program Files\gs\gs10.08.0"
 
 [CmdletBinding()]
 param(
@@ -20,7 +21,9 @@ param(
     [string]$Thumbprint = "",
     [string]$TimestampUrl = "http://timestamp.digicert.com",
     [switch]$SkipInstaller,
-    [string]$InnoCompiler = ""
+    [string]$InnoCompiler = "",
+    [string]$GhostscriptDir = "",
+    [switch]$StripGhostscriptFonts
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +69,53 @@ foreach ($script in @(
     (Join-Path $PSScriptRoot "install.ps1")
 )) {
     Copy-Item -Path $script -Destination $publishDir -Force
+}
+
+# Ghostscript is needed only when the till captures PostScript/PDF jobs. Staging
+# it under publish\ghostscript puts it in both the zip and the setup .exe (which
+# ship publish\* recursively), so a PostScript till needs no separate install.
+# Redistributing the binaries carries the AGPL conditions noted in
+# packaging\README.md; leave the switch out and install gs on the till instead if
+# that is not acceptable for the deployment.
+if (-not [string]::IsNullOrWhiteSpace($GhostscriptDir)) {
+    if (-not (Test-Path $GhostscriptDir)) {
+        throw "GhostscriptDir '$GhostscriptDir' does not exist. Point it at the folder containing bin\gswin64c.exe."
+    }
+
+    $gsSource = (Resolve-Path $GhostscriptDir).Path
+    if (-not (Test-Path (Join-Path $gsSource "bin\gswin64c.exe"))) {
+        throw "No bin\gswin64c.exe under $gsSource; that is not a 64-bit Ghostscript folder."
+    }
+
+    $gsTarget = Join-Path $publishDir "ghostscript"
+    if (Test-Path $gsTarget) { Remove-Item $gsTarget -Recurse -Force }
+    New-Item -ItemType Directory -Path $gsTarget -Force | Out-Null
+
+    # Ghostscript finds its own resources relative to the executable, so bin, lib
+    # and Resource have to travel together; doc and the installer icons need not.
+    foreach ($folder in @("bin", "lib", "Resource")) {
+        $source = Join-Path $gsSource $folder
+        if (Test-Path $source) {
+            Copy-Item -Path $source -Destination (Join-Path $gsTarget $folder) -Recurse -Force
+        }
+    }
+
+    # Ship the licence text that covers the redistributed binaries.
+    Get-ChildItem -Path $gsSource -File |
+        Where-Object { $_.Name -match "^(license|copying|agpl|gpl|notice)" } |
+        Copy-Item -Destination $gsTarget -Force
+
+    if ($StripGhostscriptFonts) {
+        $fontDir = Join-Path $gsTarget "Resource\Font"
+        if (Test-Path $fontDir) {
+            Remove-Item $fontDir -Recurse -Force
+            Write-Host "Stripped Resource\Font: a much smaller bundle, but glyph substitutes may appear on printed invoices."
+        }
+    }
+
+    $gsSizeMb = [math]::Round(
+        (Get-ChildItem -Path $gsTarget -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+    Write-Host "Bundled Ghostscript from $gsSource ($gsSizeMb MB) into $gsTarget."
 }
 
 function Resolve-SignTool {

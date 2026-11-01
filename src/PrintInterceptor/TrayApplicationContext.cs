@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -126,6 +125,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Open fiscalised invoices folder", null, OpenFiscalisedInvoices));
         menu.Items.Add(new ToolStripMenuItem("Open logs folder", null, OpenLogs));
         menu.Items.Add(new ToolStripMenuItem("Open data folder", null, OpenData));
+        menu.Items.Add(new ToolStripMenuItem("Import receipt parse profile…", null, ImportParseProfile));
+        menu.Items.Add(new ToolStripMenuItem("Open parse profiles folder", null, OpenParseProfiles));
         menu.Items.Add(new ToolStripSeparator());
 
         _autostartItem = new ToolStripMenuItem("Start with Windows", null, ToggleAutostart)
@@ -742,36 +743,80 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        OpenPath(_config.ConfigPath);
+        ShellOpen.Path(_config.ConfigPath);
     }
 
     private void OpenReceivedFiles(object? sender, EventArgs e)
     {
         var path = Path.Combine(_config.ResolveDataDirectory(), "jobs");
         Directory.CreateDirectory(path);
-        OpenPath(path);
+        ShellOpen.Path(path);
     }
 
     private void OpenFiscalisedInvoices(object? sender, EventArgs e)
     {
         var path = Path.Combine(_config.ResolveDataDirectory(), "fiscalised");
         Directory.CreateDirectory(path);
-        OpenPath(path);
+        ShellOpen.Path(path);
     }
 
     private void OpenLogs(object? sender, EventArgs e)
     {
         var path = Path.Combine(_config.ResolveDataDirectory(), "logs");
         Directory.CreateDirectory(path);
-        OpenPath(path);
+        ShellOpen.Path(path);
     }
 
     private void OpenData(object? sender, EventArgs e)
     {
         var path = _config.ResolveDataDirectory();
         Directory.CreateDirectory(path);
-        OpenPath(path);
+        ShellOpen.Path(path);
     }
+
+    /// <summary>
+    /// Installs a profile file received from another till. Importing deliberately does
+    /// not apply it: the operator picks the layout in Settings, so a wrong file cannot
+    /// silently change what the next receipt is read as.
+    /// </summary>
+    private void ImportParseProfile(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import a receipt parse profile",
+            Filter = "Parse profile (*.json)|*.json|All files (*.*)|*.*"
+        };
+        if (dialog.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        try
+        {
+            var installed = Profiles.Import(dialog.FileName);
+            _log.Info($"Imported parse profile '{Path.GetFileNameWithoutExtension(installed)}' to {installed}.");
+            if (MessageBox.Show(
+                    $"Installed {Path.GetFileName(installed)}.\n\n" +
+                    "Open Settings and pick it under Receipt parsing profile to use its rules.",
+                    "Parse profile imported",
+                    MessageBoxButtons.OKCancel,
+                    MessageBoxIcon.Question) == DialogResult.OK)
+            {
+                ShowSettings();
+            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            _log.Warn($"A parse profile could not be imported: {ex.Message}");
+            MessageBox.Show(ex.Message, "Could not import the profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void OpenParseProfiles(object? sender, EventArgs e) => ShellOpen.Folder(Profiles.UserDirectory);
+
+    private ParseProfileStore? _profiles;
+
+    private ParseProfileStore Profiles => _profiles ??= ParseProfileStore.ForCurrentInstall();
 
     private void ToggleAutostart(object? sender, EventArgs e)
     {
@@ -814,18 +859,6 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void Balloon(string title, string text, ToolTipIcon icon) =>
         _notifyIcon.ShowBalloonTip(5000, title, Truncate(text, 250), icon);
-
-    private static void OpenPath(string path)
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, "PrintInterceptor", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
 
     private void Exit(object? sender, EventArgs e)
     {

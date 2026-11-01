@@ -25,6 +25,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Parse profiles ship next to the executable; {app}\profiles is the read-only
+         built-in folder the tray and Settings list alongside the operator's own. -->
+    <Content Include="../../profiles/*.json" Link="profiles/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\PrintInterceptor.Core\PrintInterceptor.Core.csproj" />
   </ItemGroup>
 

@@ -62,6 +62,45 @@ public sealed class JobStore
     }
 
     /// <summary>
+    /// Keeps the bytes exactly as the POS sent them, which is what the
+    /// original-invoice template replays or renders. Text jobs are stored too: a
+    /// decoded .txt has already lost the ESC/POS formatting.
+    /// </summary>
+    public string? SaveOriginalCopy(string hash, byte[] raw, JobFormat format)
+    {
+        if (!_config.Storage.RetainJobs)
+        {
+            return null;
+        }
+
+        try
+        {
+            var directory = Path.Combine(_jobsRoot, DateTime.Now.ToString("yyyy-MM-dd"), "original");
+            Directory.CreateDirectory(directory);
+
+            var extension = format switch
+            {
+                JobFormat.Pdf => ".pdf",
+                JobFormat.PostScript => ".ps",
+                _ => ".bin"
+            };
+
+            var path = Path.Combine(directory, hash + extension);
+            if (!File.Exists(path))
+            {
+                File.WriteAllBytes(path, raw);
+            }
+
+            return path;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Could not retain the original print job", ex);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Preserves the original bytes when decoding fails. Without this path an
     /// unreadable or unsupported spool file disappeared without any file history.
     /// </summary>

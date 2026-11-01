@@ -12,75 +12,94 @@ namespace PrintInterceptor.Core.Parsing;
 /// </summary>
 public sealed class ReceiptParser
 {
-    private static readonly string[] InvoiceKeywords = { "Invoice", "Order", "Receipt", "INV" };
-    private static readonly string[] BuyerNameKeywords = { "Buyer", "Customer", "Client" };
+    /// <summary>How many trailing short tokens may be read as tax codes, e.g. "2.50 EX".</summary>
+    private const int MaxTaxCodesPerLine = 3;
 
-    private static readonly string[] NonItemKeywords =
-    {
-        "total", "subtotal", "sub total", "tax", "vat", "balance", "change",
-        "tendered", "paid", "payment", "discount", "rounding", "items count",
-        "order no", "invoice"
-    };
-
-    private static readonly string[] DateFormats =
-    {
-        "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy",
-        "dd-MM-yyyy HH:mm:ss", "dd-MM-yyyy HH:mm", "dd-MM-yyyy",
-        "yyyy-MM-dd HH:mm:ss", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd",
-        "dd MMM yyyy HH:mm", "dd MMM yyyy"
-    };
-
-    private static readonly Regex EmailPattern = new(
-        @"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
-        RegexOptions.Compiled);
-
-    private static readonly Regex InvoiceNumberPattern = new(
-        @"(?i)\b(?:invoice\s*(?:no|number)?|order\s*no\.?|number)\s*[:#\-]?\s*(?<value>[A-Z]{2,5}[\-/]?\d{3,}|\d{4,})",
-        RegexOptions.Compiled);
-
-    private const string InvoiceNumberToken = @"\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?";
-    private const string InvoiceQuantityToken = @"\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?";
-
-    // Invoice PDFs often collapse the table into one line, e.g.
-    // "1M113.040.00%15.00%M113.04M130.00".
-    private static readonly Regex InvoiceRowPattern = new(
-        @"^(?<name>.*?)\s*(?<qty>" + InvoiceQuantityToken + @")\s*(?:[A-Z]{1,3}\s*)?(?<price>" + InvoiceNumberToken + @")\s*" +
-        @"(?<disc>" + InvoiceNumberToken + @")\s*%\s*(?<vat>" + InvoiceNumberToken + @")\s*%\s*" +
-        @"(?:[A-Z]{1,3}\s*)?(?<exclusive>" + InvoiceNumberToken + @")" +
-        @"(?:\s*(?:[A-Z]{1,3}\s*)?(?<inclusive>" + InvoiceNumberToken + @"))?$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex CurrencyBeforeAmountPattern = new(
-        @"(?<![A-Za-z])M\s*\d{1,3}(?:,\d{3})*\.\d{2}(?![0-9])",
-        RegexOptions.Compiled);
-
-    private static readonly Regex BuyerLabelPattern = new(
-        @"^(VAT|TIN|No\.?|Name|Address|Email|Phone|Telephone)\b",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static readonly Regex AmountLinePattern = new(
-        @"^[A-Z]{0,3}\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    // Two-line item layout used by many fiscal registers:
-    //   "34400 x 2.400"  (unit price x quantity)
-    //   "BIRTHDAY-DICORAN *82,560.00"  (name and line subtotal)
-    private static readonly Regex TwoLineQuantityPattern = new(
-        @"^(?<price>[\d,]+(?:\.\d+)?)\s*[xX]\s*(?<qty>[\d,]+(?:\.\d+)?)$",
-        RegexOptions.Compiled);
-
-    private static readonly Regex TwoLineNameAmountPattern = new(
-        @"^(?<name>.+?)\s*\*?\s*(?<amount>-?[\d,]+\.\d{2})$",
-        RegexOptions.Compiled);
+    private const int MaxTaxCodeLength = 4;
 
     private readonly ParseConfig _config;
+    private readonly Regex _emailPattern;
+    private readonly Regex _invoiceNumberPattern;
+    private readonly Regex _invoiceRowPattern;
+    private readonly Regex _currencyBeforeAmountPattern;
+    private readonly Regex _buyerLabelPattern;
+    private readonly Regex _amountLinePattern;
+    private readonly Regex _twoLineQuantityPattern;
+    private readonly Regex _twoLineNameAmountPattern;
+    private readonly string[] _dateFormats;
+    private readonly TaxMarkerReader _tax;
 
     public ReceiptParser(ParseConfig config)
     {
         _config = config;
+        _tax = new TaxMarkerReader(config);
+
+        var timeout = TimeSpan.FromMilliseconds(config.Limits.RegexTimeoutMilliseconds);
+        var patterns = config.Patterns;
+        _dateFormats = config.DateFormats.ToArray();
+        _emailPattern = Compile(patterns.Email, timeout, RegexOptions.None);
+        _invoiceNumberPattern = Compile(patterns.InvoiceNumber, timeout, RegexOptions.None);
+        _invoiceRowPattern = Compile(patterns.InvoiceRow, timeout, RegexOptions.IgnoreCase);
+        _currencyBeforeAmountPattern = Compile(patterns.CurrencyBeforeAmount, timeout, RegexOptions.None);
+        _buyerLabelPattern = Compile(patterns.BuyerLabel, timeout, RegexOptions.IgnoreCase);
+        _amountLinePattern = Compile(patterns.AmountLine, timeout, RegexOptions.IgnoreCase);
+        _twoLineQuantityPattern = Compile(patterns.TwoLineQuantity, timeout, RegexOptions.None);
+        _twoLineNameAmountPattern = Compile(patterns.TwoLineNameAmount, timeout, RegexOptions.None);
+    }
+
+    /// <summary>
+    /// A profile can carry any regex, and the JIT compiler rejects a few that the
+    /// interpreter accepts. Falling back to the interpreter keeps a hand-edited
+    /// profile working instead of taking the till down for a pattern quirk.
+    /// </summary>
+    private static Regex Compile(string pattern, TimeSpan timeout, RegexOptions options)
+    {
+        try
+        {
+            return new Regex(pattern, options | RegexOptions.Compiled | RegexOptions.CultureInvariant, timeout);
+        }
+        catch (ArgumentException)
+        {
+            return new Regex(pattern, options | RegexOptions.CultureInvariant, timeout);
+        }
+    }
+
+    private int MinItemTokens => _config.Limits.MinItemTokens;
+
+    private decimal LineTolerance => _config.Limits.LineTolerance;
+
+    /// <summary>
+    /// The absolute test is used on its own for a printed total: a document-level
+    /// disagreement means an unmodelled discount or charge, so it must stay exact.
+    /// Line arithmetic additionally allows a relative error, because a POS rounds
+    /// the unit price it prints and a heavily rounded line still has to parse.
+    /// </summary>
+    private bool WithinTolerance(decimal expected, decimal actual)
+    {
+        var limits = _config.Limits;
+        var error = Math.Abs(expected - actual);
+        return error <= limits.LineTolerance ||
+               (actual != 0 && error / Math.Max(actual, expected) <= limits.RelativeTolerance);
     }
 
     public ParseResult Parse(string text)
+    {
+        try
+        {
+            return ParseText(text);
+        }
+        catch (RegexMatchTimeoutException ex)
+        {
+            // A profile pattern backtracked past its per-match budget. The job is held
+            // for review instead of taking the capture thread down with it.
+            return ParseResult.Review(
+                $"A parse pattern from profile '{_config.Profile}' timed out on this job " +
+                $"({ex.Pattern?[..Math.Min(ex.Pattern.Length, 40)]}…). Nothing was fiscalised; " +
+                "narrow the pattern or raise parse.limits.regexTimeoutMilliseconds.");
+        }
+    }
+
+    private ParseResult ParseText(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -103,57 +122,40 @@ public sealed class ReceiptParser
         }
 
         var strategy = DetectStrategy(lines, start, end);
-        if (strategy is not null && strategy.Confidence < 0.6)
+        if (strategy is not null && strategy.Confidence < _config.Limits.MinConfidence)
         {
             warnings.Add($"Low column confidence ({strategy.Confidence:P0}); verify the parsed items.");
         }
 
         var items = new List<ParsedItem>();
+        var taxDecisions = new List<TaxBucket>();
         decimal total = 0;
         decimal taxTotal = 0;
 
         if (strategy is not null)
         {
+            string? sectionTaxType = null;
             for (var i = start; i < end && i < lines.Length; i++)
             {
                 var line = lines[i].Trim();
-                if (line.Length == 0 || IsNonItemLine(line))
+                if (line.Length == 0)
                 {
                     continue;
                 }
 
-                var tokens = SplitTokens(line);
-                if (tokens.Length < 4)
+                var columnItem = TryReadColumnItem(line, strategy);
+                if (columnItem is null)
                 {
+                    // A line that is not an item may be the header that names the lines
+                    // below it: "ZERO RATED ITEMS", "EXEMPT SUPPLIES".
+                    sectionTaxType = _tax.ReadSection(line) ?? sectionTaxType;
                     continue;
                 }
 
-                var indices = strategy.Resolve(tokens.Length);
-                if (indices is null)
-                {
-                    continue;
-                }
-
-                if (!TryParseMoney(tokens[indices.Value.Qty], out var quantity) ||
-                    !TryParseMoney(tokens[indices.Value.Price], out var unitPrice) ||
-                    !TryParseMoney(tokens[indices.Value.Amount], out var amount))
-                {
-                    continue;
-                }
-
-                if (quantity <= 0 || amount < 0)
-                {
-                    continue;
-                }
-
-                var name = BuildItemName(tokens, indices.Value);
-                if (name.Length == 0)
-                {
-                    name = "Item";
-                }
-
-                items.Add(CreateItem(name, quantity, unitPrice, amount, out var lineTax));
-                total += amount;
+                var bucket = ResolveTaxBucket(line, columnItem.Slot, null, sectionTaxType);
+                items.Add(CreateItem(columnItem.Name, columnItem.Quantity, columnItem.UnitPrice, columnItem.Amount, bucket, out var lineTax));
+                taxDecisions.Add(bucket);
+                total += columnItem.Amount;
                 taxTotal += lineTax;
             }
         }
@@ -163,7 +165,7 @@ public sealed class ReceiptParser
         // column layout produced nothing, so the formats never mix.
         if (items.Count == 0)
         {
-            ParseTwoLineItems(lines, start, end, items, ref total, ref taxTotal, warnings);
+            ParseTwoLineItems(lines, start, end, items, taxDecisions, ref total, ref taxTotal, warnings);
         }
 
         if (items.Count == 0)
@@ -181,13 +183,15 @@ public sealed class ReceiptParser
         }
 
         var printedTotal = ExtractPrintedTotal(lines);
-        if (printedTotal is not null && Math.Abs(printedTotal.Value - total) > 0.05m)
+        if (printedTotal is not null && Math.Abs(printedTotal.Value - total) > LineTolerance)
         {
             return ParseResult.Review(
                 $"Parsed item total {total:0.00} does not match the printed total {printedTotal.Value:0.00}. " +
                 "Discounts or non-item charges are not supported; refusing to fiscalise.",
                 warnings);
         }
+
+        ReportTaxDecisions(taxDecisions, warnings);
 
         var invoiceNumber = ExtractInvoiceNumber(lines);
         if (string.IsNullOrEmpty(invoiceNumber))
@@ -206,15 +210,7 @@ public sealed class ReceiptParser
                 warnings);
         }
 
-        var buyer = new ParsedBuyer
-        {
-            Name = ExtractBuyerName(lines),
-            VatNumber = ExtractBuyerVat(lines),
-            Tin = ExtractBuyerTin(lines),
-            Email = ExtractEmail(lines),
-            Phone = ExtractValue(lines, new[] { _config.CustomerTelephoneNumber, "Phone", "Tel" }),
-            Address = ExtractValue(lines, new[] { _config.CustomerAddress, "Address" })
-        };
+        var buyer = BuildBuyer(lines);
 
         var receipt = new ParsedReceipt
         {
@@ -235,6 +231,22 @@ public sealed class ReceiptParser
         return ParseResult.Success(receipt, warnings);
     }
 
+    private ParsedBuyer BuildBuyer(string[] lines) => new()
+    {
+        Name = ExtractBuyerName(lines),
+        VatNumber = ExtractBuyerVat(lines),
+        Tin = ExtractBuyerTin(lines),
+        Email = ExtractEmail(lines),
+        Phone = ExtractValue(lines, LabelsFor(_config.CustomerTelephoneNumber, _config.PhoneLabels)),
+        Address = ExtractValue(lines, LabelsFor(_config.CustomerAddress, _config.AddressLabels))
+    };
+
+    /// <summary>The field's own configured label first, then the profile's fallback labels.</summary>
+    private static IEnumerable<string> LabelsFor(string configured, IEnumerable<string> fallback) =>
+        fallback is null
+            ? new[] { configured }
+            : new[] { configured }.Concat(fallback);
+
     private ParseResult? TryParseInvoiceTable(string[] lines, string text)
     {
         var header = FindInvoiceTableHeader(lines);
@@ -244,10 +256,12 @@ public sealed class ReceiptParser
         }
 
         var items = new List<ParsedItem>();
+        var taxDecisions = new List<TaxBucket>();
         var warnings = new List<string>();
         var pendingName = new StringBuilder();
         decimal total = 0;
         decimal taxTotal = 0;
+        string? sectionTaxType = null;
 
         for (var i = header + 1; i < lines.Length; i++)
         {
@@ -262,9 +276,19 @@ public sealed class ReceiptParser
                 break;
             }
 
-            var match = InvoiceRowPattern.Match(line);
+            var match = _invoiceRowPattern.Match(line);
             if (!match.Success)
             {
+                // A line the row pattern rejects may still be the header that names the rows
+                // below it; either way it is not part of an item's description.
+                var section = _tax.ReadSection(line);
+                if (section is not null)
+                {
+                    sectionTaxType = section;
+                    pendingName.Clear();
+                    continue;
+                }
+
                 if (pendingName.Length > 0)
                 {
                     pendingName.Append(' ');
@@ -274,13 +298,21 @@ public sealed class ReceiptParser
                 continue;
             }
 
-            if (!TryParseInvoiceRow(match, pendingName.ToString(), out var item, out var lineTax, out var rowError))
+            if (!TryParseInvoiceRow(
+                    match,
+                    pendingName.ToString(),
+                    sectionTaxType,
+                    out var item,
+                    out var bucket,
+                    out var lineTax,
+                    out var rowError))
             {
                 warnings.Add(rowError);
                 continue;
             }
 
             items.Add(item);
+            taxDecisions.Add(bucket);
             total += item.Amount;
             taxTotal += lineTax;
             pendingName.Clear();
@@ -295,7 +327,7 @@ public sealed class ReceiptParser
         taxTotal = Math.Round(taxTotal, 2);
 
         var printedTotal = ExtractPrintedTotal(lines);
-        if (printedTotal is not null && Math.Abs(printedTotal.Value - total) > 0.05m)
+        if (printedTotal is not null && Math.Abs(printedTotal.Value - total) > LineTolerance)
         {
             return ParseResult.Review(
                 $"Parsed invoice item total {total:0.00} does not match the printed total {printedTotal.Value:0.00}. " +
@@ -303,20 +335,26 @@ public sealed class ReceiptParser
                 warnings);
         }
 
+        ReportTaxDecisions(taxDecisions, warnings);
+
         return BuildParsedResult(lines, text, items, total, taxTotal, warnings);
     }
 
-    private static int FindInvoiceTableHeader(string[] lines)
+    private int FindInvoiceTableHeader(string[] lines)
     {
+        // Profiles are hand-edited, so "Excl. Total" and "EXCLTOTAL" name the same column.
+        var required = _config.ItemTableHeaderRequires.Select(CollapseInvoiceHeader).ToArray();
+        var anyOf = _config.ItemTableHeaderAnyOf.Select(CollapseInvoiceHeader).ToArray();
+        if (required.Length == 0 || anyOf.Length == 0)
+        {
+            return -1;
+        }
+
         for (var i = 0; i < lines.Length; i++)
         {
             var normalized = CollapseInvoiceHeader(lines[i]);
-            if (normalized.Contains("DESCRIPTION", StringComparison.Ordinal) &&
-                normalized.Contains("QUANTITY", StringComparison.Ordinal) &&
-                (normalized.Contains("EXCLUSIVETOTAL", StringComparison.Ordinal) ||
-                 normalized.Contains("INCLUSIVETOTAL", StringComparison.Ordinal) ||
-                 normalized.Contains("EXCLTOTAL", StringComparison.Ordinal) ||
-                 normalized.Contains("INCLTOTAL", StringComparison.Ordinal)))
+            if (required.All(token => normalized.Contains(token, StringComparison.Ordinal)) &&
+                anyOf.Any(token => normalized.Contains(token, StringComparison.Ordinal)))
             {
                 return i;
             }
@@ -325,43 +363,29 @@ public sealed class ReceiptParser
         return -1;
     }
 
-    private static string CollapseInvoiceHeader(string line)
-    {
-        var builder = new StringBuilder(line.Length);
-        foreach (var ch in line)
-        {
-            if (char.IsLetterOrDigit(ch))
-            {
-                builder.Append(char.ToUpperInvariant(ch));
-            }
-        }
+    private static string CollapseInvoiceHeader(string line) => TaxMarkerReader.Collapse(line);
 
-        return builder.ToString();
-    }
-
-    private static bool IsInvoiceTableEnd(string line)
+    private bool IsInvoiceTableEnd(string line)
     {
         var lower = line.Trim().ToLowerInvariant();
-        return lower.StartsWith("banking details", StringComparison.Ordinal) ||
-               lower.StartsWith("total", StringComparison.Ordinal) ||
-               lower.StartsWith("sub total", StringComparison.Ordinal) ||
-               lower.StartsWith("grand total", StringComparison.Ordinal) ||
-               lower.StartsWith("balance due", StringComparison.Ordinal) ||
-               lower.StartsWith("payment", StringComparison.Ordinal) ||
-               lower.StartsWith("terms", StringComparison.Ordinal) ||
-               lower.StartsWith("thank you", StringComparison.Ordinal);
+        return _config.ItemTableEndMarkers.Any(marker =>
+            !string.IsNullOrWhiteSpace(marker) &&
+            lower.StartsWith(marker.Trim().ToLowerInvariant(), StringComparison.Ordinal));
     }
 
-    private static bool TryParseInvoiceRow(
+    private bool TryParseInvoiceRow(
         Match match,
         string pendingName,
+        string? sectionTaxType,
         out ParsedItem item,
+        out TaxBucket bucket,
         out decimal lineTax,
         out string error)
     {
         item = null!;
         lineTax = 0;
         error = "";
+        bucket = new TaxBucket(_tax.DefaultTaxType, TaxFromDefault, null, null, null);
 
         if (!TryParseMoney(match.Groups["qty"].Value, out var quantity) || quantity <= 0)
         {
@@ -389,7 +413,7 @@ public sealed class ReceiptParser
         var discount = Math.Clamp(discountPercent / 100m, 0m, 1m);
         var vatRate = Math.Max(0m, vatPercent / 100m);
         var expectedExclusive = Math.Round(quantity * unitPrice * (1m - discount), 2);
-        if (Math.Abs(expectedExclusive - exclusiveTotal) > 0.05m)
+        if (Math.Abs(expectedExclusive - exclusiveTotal) > LineTolerance)
         {
             error = $"Invoice row qty x price ({expectedExclusive:0.00}) does not match its exclusive total ({exclusiveTotal:0.00}).";
             return false;
@@ -399,7 +423,7 @@ public sealed class ReceiptParser
         if (hasInclusive)
         {
             var expectedInclusive = Math.Round(exclusiveTotal * (1m + vatRate), 2);
-            if (Math.Abs(expectedInclusive - amount) > 0.05m)
+            if (Math.Abs(expectedInclusive - amount) > LineTolerance)
             {
                 error = $"Invoice row exclusive total ({exclusiveTotal:0.00}) plus VAT ({vatPercent:0.##}%) does not match its inclusive total ({amount:0.00}).";
                 return false;
@@ -413,9 +437,29 @@ public sealed class ReceiptParser
             name = "Item";
         }
 
-        var taxType = vatRate <= 0m ? "ZERO_RATED" : "STANDARD";
-        item = new ParsedItem(name, quantity, amount / quantity, Math.Round(amount, 2), taxType, vatRate);
+        bucket = ResolveTaxBucket(
+            $"{pendingName} {match.Value}",
+            TaxRowSlotTokens(match),
+            vatRate,
+            sectionTaxType);
+
+        // The row's own columns stay the source of the money; the bucket only decides which
+        // ZIMRA tax ID the gateway files it under.
+        var itemRate = bucket.TaxType == ParseConfig.TaxTypeStandard
+            ? (vatRate > 0 ? vatRate : (decimal)_config.VatRate)
+            : 0m;
+
+        item = new ParsedItem(name, quantity, amount / quantity, Math.Round(amount, 2), bucket.TaxType, itemRate);
         return true;
+    }
+
+    /// <summary>The invoice row's own tax column, when the profile's pattern exposes one.</summary>
+    private static IReadOnlyList<string> TaxRowSlotTokens(Match match)
+    {
+        var group = match.Groups["tax"];
+        return group.Success && !string.IsNullOrWhiteSpace(group.Value)
+            ? new[] { group.Value.Trim() }
+            : Array.Empty<string>();
     }
 
     private static string CombineInvoiceItemName(string pendingName, string inlineName)
@@ -457,15 +501,7 @@ public sealed class ReceiptParser
             TransactionType = transactionType,
             RelatedInvoiceNumber = relatedInvoice,
             CreditNoteReason = reason,
-            Buyer = new ParsedBuyer
-            {
-                Name = ExtractBuyerName(lines),
-                VatNumber = ExtractBuyerVat(lines),
-                Tin = ExtractBuyerTin(lines),
-                Email = ExtractEmail(lines),
-                Phone = ExtractValue(lines, new[] { _config.CustomerTelephoneNumber, "Phone", "Tel" }),
-                Address = ExtractValue(lines, new[] { _config.CustomerAddress, "Address" })
-            },
+            Buyer = BuildBuyer(lines),
             Total = Math.Round(total, 2),
             TaxTotal = Math.Round(taxTotal, 2),
             SourceText = text
@@ -529,8 +565,8 @@ public sealed class ReceiptParser
                         continue;
                     }
 
-                    var tokens = SplitTokens(line);
-                    var indices = strategy.Resolve(tokens.Length);
+                    var tokens = SplitItemTokens(line).Tokens;
+                    var indices = strategy.Resolve(tokens.Length, MinItemTokens);
                     if (indices is null)
                     {
                         continue;
@@ -546,12 +582,11 @@ public sealed class ReceiptParser
 
                     attempts++;
                     var expected = Math.Round(quantity * price, 2);
-                    var error = Math.Abs(expected - amount);
 
-                    if (error <= 0.05m || (amount != 0 && error / Math.Max(amount, expected) <= 0.02m))
+                    if (WithinTolerance(expected, amount))
                     {
                         valid++;
-                        totalError += error;
+                        totalError += Math.Abs(expected - amount);
                     }
                 }
 
@@ -593,25 +628,131 @@ public sealed class ReceiptParser
 
     private bool IsVatInclusive => _config.VatFlag.Trim() == "1";
 
-    private ParsedItem CreateItem(string name, decimal quantity, decimal unitPrice, decimal amount, out decimal lineTax)
-    {
-        var taxType = "STANDARD";
-        var taxRate = (decimal)_config.VatRate;
+    /// <summary>
+    /// The VAT bucket chosen for one line, how it was chosen — which is what turns "the
+    /// receipt did not say" into a warning an operator can act on — and the rate the row
+    /// printed, when the paper stated one.
+    /// </summary>
+    private sealed record TaxBucket(
+        string TaxType,
+        string Source,
+        string? Marker,
+        string? ConflictsWith,
+        decimal? PrintedRate);
 
-        if (!string.IsNullOrWhiteSpace(_config.NonTaxSymbol) &&
-            name.Contains(_config.NonTaxSymbol, StringComparison.OrdinalIgnoreCase))
+    private const string TaxFromMarker = "marker";
+    private const string TaxFromSection = "section";
+    private const string TaxFromPrintedRate = "printed rate";
+    private const string TaxFromDefault = "default";
+
+    /// <summary>
+    /// The bucket for one item line: a marker on the line itself, then the header naming the
+    /// block it sits in, then the VAT percent the row printed, then parse.defaultTaxType.
+    /// Nothing here can hold a job — a sale is never blocked because its tax status is
+    /// unclear, because the till has to keep serving.
+    /// </summary>
+    private TaxBucket ResolveTaxBucket(
+        string line,
+        IReadOnlyList<string> slotTokens,
+        decimal? printedRate,
+        string? sectionTaxType)
+    {
+        var marker = _tax.Read(line, slotTokens);
+        if (marker is not null)
         {
-            taxType = "EXEMPT";
-            taxRate = 0m;
+            return new TaxBucket(marker.TaxType, TaxFromMarker, marker.Marker, marker.ConflictsWith, printedRate);
         }
-        else if (taxRate <= 0m)
+
+        if (sectionTaxType is not null)
         {
-            taxType = "ZERO_RATED";
-            taxRate = 0m;
+            return new TaxBucket(sectionTaxType, TaxFromSection, null, null, printedRate);
         }
+
+        if (printedRate is { } rate)
+        {
+            return new TaxBucket(
+                rate > 0 ? ParseConfig.TaxTypeStandard : ParseConfig.TaxTypeZeroRated,
+                TaxFromPrintedRate,
+                null,
+                null,
+                rate);
+        }
+
+        // With nothing on the paper to read, the shop's own configuration speaks: a business
+        // with no VAT rate configured is not charging STANDARD on anything.
+        if (_tax.DefaultTaxType == ParseConfig.TaxTypeStandard && _config.VatRate <= 0)
+        {
+            return new TaxBucket(ParseConfig.TaxTypeZeroRated, TaxFromDefault, null, null, null);
+        }
+
+        return new TaxBucket(_tax.DefaultTaxType, TaxFromDefault, null, null, null);
+    }
+
+    /// <summary>
+    /// Reports what the markers could not settle. A POS that prints no per-line tax statement
+    /// is not a fault, so that case stays quiet; a receipt where only part of the lines
+    /// declared theirs is how a code missing from the profile shows up.
+    /// </summary>
+    private void ReportTaxDecisions(IReadOnlyList<TaxBucket> decisions, List<string> warnings)
+    {
+        foreach (var conflict in decisions.Where(decision => decision.ConflictsWith is not null).Take(3))
+        {
+            warnings.Add(
+                $"A line declares {conflict.TaxType} ('{conflict.Marker}') and {conflict.ConflictsWith}; " +
+                $"fiscalised as {conflict.TaxType}. Remove whichever marker this POS does not print.");
+        }
+
+        foreach (var contradiction in decisions
+                     .Where(decision => decision.Source == TaxFromMarker && ContradictsPrintedRate(decision))
+                     .Take(3))
+        {
+            warnings.Add(
+                $"A line declares {contradiction.TaxType} ('{contradiction.Marker}') but prints " +
+                $"{contradiction.PrintedRate!.Value:P1} VAT; fiscalised as {contradiction.TaxType}.");
+        }
+
+        var unmarked = decisions.Count(decision => decision.Source == TaxFromDefault);
+        if (unmarked > 0 && unmarked < decisions.Count)
+        {
+            warnings.Add(
+                $"{unmarked} of {decisions.Count} item lines print no tax marker; fiscalised as " +
+                $"{_tax.DefaultTaxType}. Add this POS's tax codes to parse.taxRules if some of them are " +
+                "zero-rated or exempt.");
+        }
+
+        var zeroRatedByRate = decisions.Count(decision =>
+            decision.Source == TaxFromPrintedRate && decision.TaxType == ParseConfig.TaxTypeZeroRated);
+        if (zeroRatedByRate > 0)
+        {
+            warnings.Add(
+                $"{zeroRatedByRate} line(s) print 0% VAT with no tax code, read as ZERO_RATED. A 0% figure " +
+                "cannot tell a zero-rated supply from an exempt one — if this POS sells exempt items, " +
+                "add the code it prints to parse.taxRules.");
+        }
+    }
+
+    /// <summary>
+    /// A 0% figure is not a claim of exemption, so it only contradicts a marker that says the
+    /// line is taxable.
+    /// </summary>
+    private static bool ContradictsPrintedRate(TaxBucket decision) =>
+        decision.PrintedRate is { } rate &&
+        (decision.TaxType == ParseConfig.TaxTypeStandard) != (rate > 0);
+
+    private ParsedItem CreateItem(
+        string name,
+        decimal quantity,
+        decimal unitPrice,
+        decimal amount,
+        TaxBucket bucket,
+        out decimal lineTax)
+    {
+        // Only STANDARD carries a rate. The gateway charges the company rate behind the API
+        // key; this rate is used for the tax shown on the till's own copy.
+        var taxRate = bucket.TaxType == ParseConfig.TaxTypeStandard ? (decimal)_config.VatRate : 0m;
 
         lineTax = CalculateLineTax(amount, taxRate);
-        return new ParsedItem(name, quantity, unitPrice, amount, taxType, taxRate);
+        return new ParsedItem(name, quantity, unitPrice, amount, bucket.TaxType, taxRate);
     }
 
     private void ParseTwoLineItems(
@@ -619,29 +760,35 @@ public sealed class ReceiptParser
         int start,
         int end,
         List<ParsedItem> items,
+        List<TaxBucket> taxDecisions,
         ref decimal total,
         ref decimal taxTotal,
         List<string> warnings)
     {
         var candidates = 0;
+        string? sectionTaxType = null;
 
         for (var i = start; i < end - 1 && i < lines.Length - 1; i++)
         {
-            var quantityMatch = TwoLineQuantityPattern.Match(lines[i].Trim());
+            var quantityLine = lines[i].Trim();
+            var quantityMatch = _twoLineQuantityPattern.Match(quantityLine);
             if (!quantityMatch.Success)
             {
+                sectionTaxType = _tax.ReadSection(quantityLine) ?? sectionTaxType;
                 continue;
             }
 
             var nameLine = lines[i + 1].Trim();
             if (nameLine.Length == 0 || IsNonItemLine(nameLine))
             {
+                sectionTaxType = _tax.ReadSection(nameLine) ?? sectionTaxType;
                 continue;
             }
 
-            var nameMatch = TwoLineNameAmountPattern.Match(nameLine);
+            var nameMatch = _twoLineNameAmountPattern.Match(nameLine);
             if (!nameMatch.Success)
             {
+                sectionTaxType = _tax.ReadSection(nameLine) ?? sectionTaxType;
                 continue;
             }
 
@@ -668,13 +815,16 @@ public sealed class ReceiptParser
 
             candidates++;
             var expected = Math.Round(unitPrice * quantity, 2);
-            var error = Math.Abs(expected - amount);
-            if (error > 0.05m && !(amount != 0 && error / Math.Max(amount, expected) <= 0.02m))
+            if (!WithinTolerance(expected, amount))
             {
                 continue;
             }
 
-            items.Add(CreateItem(name, quantity, unitPrice, amount, out var lineTax));
+            // A register wraps the item over two lines and leaves no column for a tax code,
+            // so only a bracketed note or the header above the block can state its status.
+            var bucket = ResolveTaxBucket($"{quantityLine} {nameLine}", Array.Empty<string>(), null, sectionTaxType);
+            items.Add(CreateItem(name, quantity, unitPrice, amount, bucket, out var lineTax));
+            taxDecisions.Add(bucket);
             total += amount;
             taxTotal += lineTax;
             i++; // the name line belongs to this item
@@ -686,8 +836,92 @@ public sealed class ReceiptParser
         }
     }
 
-    private static string BuildItemName(string[] tokens, ColumnIndices indices)
+    /// <summary>An item line read through the winning column layout.</summary>
+    private sealed record ColumnItem(
+        string Name,
+        decimal Quantity,
+        decimal UnitPrice,
+        decimal Amount,
+        IReadOnlyList<string> Slot);
+
+    /// <summary>
+    /// Reads one line as an item, or returns null when it is not one. Splitting this out of
+    /// the loop lets the caller treat a rejected line as a possible section header instead of
+    /// losing the statement it makes about the lines below it.
+    /// </summary>
+    private ColumnItem? TryReadColumnItem(string line, ColumnStrategy strategy)
     {
+        if (IsNonItemLine(line))
+        {
+            return null;
+        }
+
+        var (tokens, trailing) = SplitItemTokens(line);
+        if (tokens.Length < MinItemTokens)
+        {
+            return null;
+        }
+
+        var indices = strategy.Resolve(tokens.Length, MinItemTokens);
+        if (indices is null)
+        {
+            return null;
+        }
+
+        if (!TryParseMoney(tokens[indices.Value.Qty], out var quantity) ||
+            !TryParseMoney(tokens[indices.Value.Price], out var unitPrice) ||
+            !TryParseMoney(tokens[indices.Value.Amount], out var amount))
+        {
+            return null;
+        }
+
+        if (quantity <= 0 || amount < 0)
+        {
+            return null;
+        }
+
+        var name = BuildItemName(tokens, indices.Value);
+        if (name.Length == 0)
+        {
+            name = "Item";
+        }
+
+        return new ColumnItem(
+            name,
+            quantity,
+            unitPrice,
+            amount,
+            trailing.Concat(TaxMarkerReader.SlotTokens(tokens, indices.Value.Amount, _config)).ToList());
+    }
+
+    /// <summary>
+    /// A tax code printed after the amount ("2.50 EX") shifts every column to its left, which
+    /// positional detection then reads as a different layout on every line. Splitting the code
+    /// off before scoring keeps a line's columns in the same place for detection and for
+    /// parsing, and hands the code back as that line's tax slot. Only a short trailing token
+    /// that could not be an amount is taken, so a description keeps its own words.
+    /// </summary>
+    private (string[] Tokens, IReadOnlyList<string> Slot) SplitItemTokens(string line)
+    {
+        var tokens = SplitTokens(line).ToList();
+        var slot = new List<string>();
+
+        while (tokens.Count > MinItemTokens && slot.Count < MaxTaxCodesPerLine)
+        {
+            var last = tokens[^1];
+            if (last.Length > MaxTaxCodeLength || !last.Any(char.IsLetter) || TryParseMoney(last, out _))
+            {
+                break;
+            }
+
+            slot.Insert(0, last);
+            tokens.RemoveAt(tokens.Count - 1);
+        }
+
+        return (tokens.ToArray(), slot);
+    }
+
+    private static string BuildItemName(string[] tokens, ColumnIndices indices)    {
         var parts = new List<string>(tokens.Length);
         for (var i = 0; i < tokens.Length; i++)
         {
@@ -704,18 +938,19 @@ public sealed class ReceiptParser
             .Trim();
     }
 
-    private static bool IsNonItemLine(string line)
+    private bool IsNonItemLine(string line)
     {
         var lower = line.ToLowerInvariant();
-        foreach (var keyword in NonItemKeywords)
+        foreach (var keyword in _config.NonItemKeywords)
         {
-            if (lower.Contains(keyword, StringComparison.Ordinal))
+            if (!string.IsNullOrWhiteSpace(keyword) &&
+                lower.Contains(keyword.Trim().ToLowerInvariant(), StringComparison.Ordinal))
             {
                 return true;
             }
         }
 
-        return lower.Contains("---") || lower.Contains("===");
+        return lower.Contains("---", StringComparison.Ordinal) || lower.Contains("===", StringComparison.Ordinal);
     }
 
     private string? ExtractInvoiceNumber(string[] lines)
@@ -725,7 +960,7 @@ public sealed class ReceiptParser
         {
             foreach (var line in lines)
             {
-                var match = InvoiceNumberPattern.Match(line);
+                var match = _invoiceNumberPattern.Match(line);
                 if (match.Success)
                 {
                     value = match.Groups["value"].Value;
@@ -736,7 +971,7 @@ public sealed class ReceiptParser
 
         if (string.IsNullOrEmpty(value))
         {
-            value = ExtractValue(lines, InvoiceKeywords);
+            value = ExtractValue(lines, _config.InvoiceNumberKeywords);
         }
 
         if (string.IsNullOrEmpty(value))
@@ -745,7 +980,7 @@ public sealed class ReceiptParser
         }
 
         value = Regex.Replace(value, @"[^A-Za-z0-9\-/]", "").Trim('-', '/');
-        return value.Length is 0 or > 40 ? null : value;
+        return value.Length is 0 || value.Length > _config.Limits.MaxInvoiceNumberLength ? null : value;
     }
 
     private string? ExtractBuyerName(string[] lines)
@@ -753,9 +988,9 @@ public sealed class ReceiptParser
         foreach (var raw in lines)
         {
             var line = raw.Trim();
-            if (string.Equals(line, "Cash Customer", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(line, "Walk-in Customer", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(line, "Walk in Customer", StringComparison.OrdinalIgnoreCase))
+            if (_config.BuyerNameLiterals.Any(literal =>
+                    !string.IsNullOrWhiteSpace(literal) &&
+                    string.Equals(line, literal.Trim(), StringComparison.OrdinalIgnoreCase)))
             {
                 return line;
             }
@@ -768,12 +1003,12 @@ public sealed class ReceiptParser
             return name;
         }
 
-        name = ExtractValue(lines, BuyerNameKeywords);
+        name = ExtractValue(lines, _config.BuyerNameKeywords);
         name = CleanBuyerName(name);
         return string.IsNullOrWhiteSpace(name) ? null : name;
     }
 
-    private static string? CleanBuyerName(string? value)
+    private string? CleanBuyerName(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -781,54 +1016,46 @@ public sealed class ReceiptParser
         }
 
         var name = Regex.Replace(value.Trim(), @"^Name\s*[:=\-]?\s*", "", RegexOptions.IgnoreCase);
-        if (name.Length == 0 || BuyerLabelPattern.IsMatch(name) || !name.Any(char.IsLetter))
+        if (name.Length == 0 || _buyerLabelPattern.IsMatch(name) || !name.Any(char.IsLetter))
         {
             return null;
         }
 
-        return name.Length > 100 ? name[..100] : name;
+        var max = _config.Limits.MaxBuyerNameLength;
+        return name.Length > max ? name[..max] : name;
     }
 
     private string? ExtractBuyerVat(string[] lines)
     {
-        var value = ExtractValue(lines, new[]
-        {
-            _config.CustomerVATNumber,
-            "Customer VAT",
-            "Buyer VAT",
-            "Client VAT"
-        });
+        var value = ExtractValue(lines, LabelsFor(_config.CustomerVATNumber, _config.VatNumberLabels));
         return CleanTaxId(value);
     }
 
     private string? ExtractBuyerTin(string[] lines)
     {
-        var value = ExtractValue(lines, new[]
-        {
-            _config.CustomerTIN,
-            "Customer TIN",
-            "Buyer TIN",
-            "Client TIN"
-        });
+        var value = ExtractValue(lines, LabelsFor(_config.CustomerTIN, _config.TinLabels));
         return CleanTaxId(value);
     }
 
-    private static string? CleanTaxId(string? value)
+    private string? CleanTaxId(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
             return null;
         }
 
-        var cleaned = Regex.Match(value, @"[A-Za-z0-9\-]{4,}").Value;
+        var cleaned = Regex.Match(
+                value,
+                @"[A-Za-z0-9\-]{" + _config.Limits.MinIdentifierLength + ",}")
+            .Value;
         return cleaned.Length == 0 || cleaned.Length > 40 ? null : cleaned;
     }
 
-    private static string? ExtractEmail(string[] lines)
+    private string? ExtractEmail(string[] lines)
     {
         foreach (var line in lines)
         {
-            var match = EmailPattern.Match(line);
+            var match = _emailPattern.Match(line);
             if (match.Success)
             {
                 return match.Value;
@@ -872,20 +1099,20 @@ public sealed class ReceiptParser
 
     private DateTimeOffset? ExtractDate(string[] lines)
     {
-        var value = ExtractValue(lines, new[] { "Date", "Dated" }) ?? ExtractValueOnNextLine(lines, new[] { "Date", "Dated" });
+        var value = ExtractValue(lines, _config.DateLabels) ?? ExtractValueOnNextLine(lines, _config.DateLabels);
         if (string.IsNullOrWhiteSpace(value))
         {
             return null;
         }
 
-        if (!DateTime.TryParseExact(value, DateFormats, CultureInfo.InvariantCulture,
+        if (!DateTime.TryParseExact(value, _dateFormats, CultureInfo.InvariantCulture,
                 DateTimeStyles.AllowWhiteSpaces, out var parsed) &&
             !DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
         {
             return null;
         }
 
-        if (parsed.Year < 2000 || parsed.Year > 2100)
+        if (parsed.Year < _config.Limits.ValidYearFrom || parsed.Year > _config.Limits.ValidYearTo)
         {
             return null;
         }
@@ -940,7 +1167,7 @@ public sealed class ReceiptParser
             }
         }
 
-        if (lines.Any(line => CurrencyBeforeAmountPattern.IsMatch(line)))
+        if (lines.Any(line => _currencyBeforeAmountPattern.IsMatch(line)))
         {
             return NormalizeCurrency("LSL");
         }
@@ -1057,7 +1284,7 @@ public sealed class ReceiptParser
         return (type, related, reason);
     }
 
-    private static decimal? ExtractPrintedTotal(string[] lines)
+    private decimal? ExtractPrintedTotal(string[] lines)
     {
         decimal? grand = null;
         decimal? fallback = null;
@@ -1100,7 +1327,7 @@ public sealed class ReceiptParser
         return grand ?? fallback;
     }
 
-    private static decimal? ExtractAmountFromLineOrNext(string[] lines, int index)
+    private decimal? ExtractAmountFromLineOrNext(string[] lines, int index)
     {
         var tokens = SplitTokens(lines[index]);
         for (var i = tokens.Length - 1; i >= 0; i--)
@@ -1114,7 +1341,7 @@ public sealed class ReceiptParser
         if (index + 1 < lines.Length)
         {
             var next = lines[index + 1].Trim();
-            if (AmountLinePattern.IsMatch(next) && TryParseMoney(next, out var value))
+            if (_amountLinePattern.IsMatch(next) && TryParseMoney(next, out var value))
             {
                 return value;
             }
@@ -1193,9 +1420,9 @@ public sealed class ReceiptParser
             ? QtyOffset > PriceOffset && PriceOffset > AmountOffset
             : QtyOffset < PriceOffset && PriceOffset < AmountOffset;
 
-        public ColumnIndices? Resolve(int tokenCount)
+        public ColumnIndices? Resolve(int tokenCount, int minTokens)
         {
-            if (tokenCount < 4)
+            if (tokenCount < minTokens)
             {
                 return null;
             }
