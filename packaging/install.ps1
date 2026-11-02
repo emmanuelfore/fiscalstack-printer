@@ -215,10 +215,10 @@ if ($null -eq $config.printing) {
 Ensure-Property $config.printing "printerName"
 Ensure-Property $config.printing "a4PrinterName"
 
-# A Ghostscript bundled into the release (build-release.ps1 -GhostscriptDir) must
-# not need operator setup. An explicit -GhostscriptPath always wins, and so does a
-# config value that still points at a working install, so a re-install keeps the
-# operator's own choice.
+# build-release.ps1 bundles Ghostscript into the release by default, so a till installed
+# from that package already has {app}\ghostscript. An explicit -GhostscriptPath always
+# wins, and so does a config value that still points at a working install, so a choice
+# made once survives a re-install.
 if ([string]::IsNullOrWhiteSpace($GhostscriptPath)) {
     $bundledGhostscript = Join-Path (Split-Path $exe -Parent) "ghostscript\bin\gswin64c.exe"
     $configuredGhostscript = if ($null -eq $config.ghostscriptPath) { "" } else { [string]$config.ghostscriptPath }
@@ -302,8 +302,8 @@ if ($PrinterMode -eq "PostScript") {
 
     if (-not $gswin) {
         Write-Warning ("PostScript mode needs Ghostscript (AGPL) and none was found. Install 64-bit " +
-            "Ghostscript and set ghostscriptPath in $ConfigPath, pass -GhostscriptPath here, or build the " +
-            "release with -GhostscriptDir so it ships in the package.")
+            "Ghostscript and set ghostscriptPath in $ConfigPath, pass -GhostscriptPath here, or rebuild the " +
+            "release without -NoGhostscript so the package carries its own copy.")
     }
     else {
         Write-Host "Ghostscript: $gswin"

@@ -36,10 +36,14 @@ POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
 - For offline signing only: a reachable FiscalStack once, so the device key, tax mapping and
   counters can be provisioned and cached. Nothing else is configured locally.
 - **Ghostscript** only if the virtual printer uses a PostScript or PDF driver
-  (`Generic / Text Only` needs no Ghostscript). Either build the package with
-  `-GhostscriptDir` so it ships inside the release, or install 64-bit Ghostscript on the
-  till and add `gswin64c.exe` to `PATH` / set `ghostscriptPath`. The app checks the config
-  value, then `<exe folder>\ghostscript\bin`, then `PATH`, then `Program Files\gs`.
+  (`Generic / Text Only` needs no Ghostscript). `packaging\build-release.ps1` bundles it
+  into the release by default, so a till needs no separate install; build with
+  `-NoGhostscript` to leave it out, or `-GhostscriptDir` to say which install to copy.
+  Otherwise install 64-bit Ghostscript on the till and add `gswin64c.exe` to `PATH` / set
+  `ghostscriptPath`. The app checks the config value, then `<exe folder>\ghostscript\bin`,
+  then `PATH`, then `Program Files\gs`.
+  Copying those binaries into a package you distribute is conveying them under AGPL-3.0;
+  [packaging/README.md](packaging/README.md#ghostscript-in-the-package) states what that obliges.
 
 ## Build
 
@@ -57,7 +61,8 @@ dotnet build src/PrintInterceptor -c Release     # compiles, cannot execute
 ## Packaged installer
 
 For till deployment use [`packaging/build-release.ps1`](packaging/build-release.ps1) on a
-Windows build host. It publishes self-contained `win-x64`, optionally signs every
+Windows build host. It publishes self-contained `win-x64`, bundles 64-bit Ghostscript found
+on the build host (pass `-NoGhostscript` to leave it out), optionally signs every
 executable with Authenticode (SHA-256 plus RFC 3161 timestamp), and produces both a zip
 and an Inno Setup `.exe` that installs the virtual printer, config, ACLs and either the
 service or tray autostart:
@@ -69,8 +74,9 @@ service or tray autostart:
 The setup is unattended-capable (`/VERYSILENT /TASKS="printer"`), keeps the API key out
 of `config.json` (machine environment instead), preserves fiscal data on uninstall, and
 avoids the installer being signed twice. See [`packaging/README.md`](packaging/README.md)
-for prerequisites, signing options, direct `install.ps1` usage, the Ghostscript AGPL
-caveat, and the Windows-only verification checklist.
+for prerequisites, signing options, direct `install.ps1` usage, how the Ghostscript bundle
+is chosen and what AGPL-3.0 requires of whoever ships it, and the Windows-only
+verification checklist.
 
 ## 1. Install the virtual printer
 
@@ -80,7 +86,8 @@ Run PowerShell **as Administrator**:
 # Raw text jobs (Generic / Text Only driver) - simplest, no Ghostscript
 .\addprinter.ps1 -Mode Text
 
-# Or PostScript/PDF jobs (Microsoft PS Class Driver) - requires Ghostscript
+# Or PostScript/PDF jobs (Microsoft PS Class Driver) - needs Ghostscript, which
+# build-release.ps1 puts in the package unless it is run with -NoGhostscript
 .\addprinter.ps1 -Mode PostScript
 ```
 
@@ -846,9 +853,14 @@ settles receipts that exist, and a receipt the server does not have is set aside
 
 ## Licensing note
 
-Ghostscript is AGPL-licensed. The release can ship it inside the package
-(`packaging/build-release.ps1 -GhostscriptDir`); doing so obliges you to carry its licence
-text and the corresponding source, or to hold a commercial licence from Artifex. Review
-that before producing a bundled package — installing Ghostscript on the till separately
-avoids the question, and the `Generic / Text Only` capture path does not need Ghostscript
-at all.
+Ghostscript is AGPL-3.0, and `packaging/build-release.ps1` now puts its binaries in the
+release by default. Copying them into a package you distribute is conveying them, which
+obliges whoever distributes it to carry the licence text and the corresponding source — the
+build writes `ghostscript\SOURCE-OFFER.txt` for that, with the contact taken from
+`-SourceOfferContact` — or to hold a commercial licence from Artifex. The generated file
+records a written offer, it does not make one: the contact has to be an address that reaches
+someone, and section 6 keeps the offer open for at least three years from the last
+distribution. That is the review to finish **before** the first customer-facing package.
+`-NoGhostscript` leaves the bundle out, installing Ghostscript on the till separately avoids
+the question, and the `Generic / Text Only` capture path does not need Ghostscript at all.
+See [packaging/README.md](packaging/README.md#ghostscript-in-the-package).

@@ -16,9 +16,10 @@ public static class GhostscriptLocator
 
     /// <summary>
     /// Configured path, then a Ghostscript bundled next to the executable
-    /// (build-release.ps1 -GhostscriptDir), then PATH, then Program Files. A
-    /// configured path that no longer exists falls through instead of failing,
-    /// because installers write absolute paths that outlive the layout they came from.
+    /// (build-release.ps1 bundles it unless run with -NoGhostscript), then PATH, then
+    /// Program Files. A configured path that no longer exists falls through instead of
+    /// failing, because installers write absolute paths that outlive the layout they came
+    /// from.
     /// </summary>
     public static string? Resolve(InterceptorConfig config, ILog? log = null)
     {

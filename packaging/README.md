@@ -25,24 +25,10 @@ review here and must be exercised once on a Windows build agent before release.
 - Windows SDK for `signtool.exe` (or `signtool` on `PATH`) **only when signing**.
 - An Authenticode code-signing certificate: either a `.pfx` file or a
   certificate installed in the machine store with a known thumbprint.
-- Ghostscript is needed only when the virtual printer uses the PostScript or PDF
-  driver; `Generic / Text Only` capture does not need it. Two supported ways to
-  provide it:
-  - **Bundle it** — `build-release.ps1 -GhostscriptDir C:\Program Files\gs\gs10.08.0`
-    copies `bin`, `lib` and `Resource` into `publish\ghostscript`, which the zip and
-    the setup `.exe` both ship (they copy `publish\*` recursively), so it lands at
-    `{app}\ghostscript`. `install.ps1` then writes that path into
-    `ghostscriptPath` unless `-GhostscriptPath` was given or the config already
-    points at a working install. Add `-StripGhostscriptFonts` to drop
-    `Resource\Font` and shrink the package, at the risk of substitute glyphs.
-    Ghostscript is AGPL-licensed: redistributing the binaries obliges you to carry
-    its licence text and the corresponding source, or to take a commercial licence
-    from Artifex. The build script copies any licence file it finds beside the
-    binaries; the source offer is yours to arrange.
-  - **Install it on the till** — 64-bit Ghostscript from ghostscript.com, either on
-    `PATH` or via `ghostscriptPath`. The app also probes
-    `<exe folder>\ghostscript\bin\gswin64c.exe` on its own, so a bundled copy works
-    with no config entry at all.
+- Ghostscript is needed when the virtual printer uses the PostScript or PDF driver;
+  `Generic / Text Only` capture does not need it. A release **bundles it by default** —
+  [Ghostscript in the package](#ghostscript-in-the-package) covers which copy is used,
+  how to name a specific install, and what AGPL-3.0 requires of whoever ships the result.
 
 ## Build a release
 
@@ -50,28 +36,74 @@ review here and must be exercised once on a Windows build agent before release.
 # Unsigned zip only
 .\packaging\build-release.ps1 -Version 1.2.0 -SkipInstaller
 
-# Signed zip + signed setup .exe (PFX prompt for the password)
-.\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx
+# Signed zip + signed setup .exe (PFX prompt for the password), Ghostscript bundled
+# and the source offer filled in
+.\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx `
+    -SourceOfferContact "support@yourcompany.zw"
 
 # Signed with a certificate from the Windows store
 .\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123456789ABCDEF0123456789ABCDEF01234567
 
-# Same, with Ghostscript inside the package for PostScript tills
+# Text-only deployment (Generic / Text Only driver): no Ghostscript in the package
+.\packaging\build-release.ps1 -Version 1.2.0 -NoGhostscript
+
+# Ghostscript copied from a named folder rather than the install found automatically
 .\packaging\build-release.ps1 -Version 1.2.0 -GhostscriptDir "C:\Program Files\gs\gs10.08.0"
 ```
 
 Outputs (under `..\dist` by default, override with `-OutputRoot`):
 
-- `publish\` — the self-contained application plus the three install scripts and the
+- `publish\` — the self-contained application plus the three install scripts, the
   shipped `profiles\` folder (the read-only receipt layouts Settings and the tray list;
-  see [Parsing profiles](../README.md#parsing-profiles)). `ghostscript\` is added when
-  `-GhostscriptDir` was used.
+  see [Parsing profiles](../README.md#parsing-profiles)), and `ghostscript\` unless
+  `-NoGhostscript` was used.
 - `PrintInterceptor-<version>-win-x64.zip` — for manual/USB installs.
 - `PrintInterceptor-<version>-setup.exe` — Inno Setup installer (when available).
 
 Version handling: `-Version` becomes the informational version, so a suffix such as
 `2026.10.31-dev` is allowed; `AssemblyVersion`/`FileVersion` receive the numeric
 part only. Default version is the current date plus `-dev`.
+
+### Ghostscript in the package
+
+`build-release.ps1` bundles 64-bit Ghostscript unless `-NoGhostscript` is passed, so a
+PostScript or PDF till needs no separate install. It never downloads anything: a release
+build pulling a third-party binary off the network is a supply-chain risk, so the source
+has to be on the build host already. The copy is chosen in this order:
+
+1. the folder named by `-GhostscriptDir` (must contain `bin\gswin64c.exe`);
+2. the install `gswin64c.exe` resolves to on `PATH`;
+3. the newest `gs*` folder under `%ProgramFiles%\gs` or `%ProgramFiles(x86)%\gs`.
+
+If none exists the build **stops** with a message naming all three escapes — installing
+the official release on the build host, `-GhostscriptDir`, `-NoGhostscript` — rather than
+quietly producing a package that cannot decode a PostScript job.
+
+`bin`, `lib` and `Resource` are copied into `publish\ghostscript`; they travel together
+because Ghostscript finds its resources relative to the executable. The zip and the setup
+`.exe` are built from `publish\*` recursively, so the bundle lands at `{app}\ghostscript`.
+`install.ps1` writes that path into `ghostscriptPath` unless `-GhostscriptPath` was given
+or the config already points at a working install, and the app probes
+`<exe folder>\ghostscript\bin\gswin64c.exe` on its own, so a bundled copy works with no
+config entry at all. `-StripGhostscriptFonts` drops `Resource\Font` and shrinks the package
+at the risk of substitute glyphs on the printed invoice. The build prints the bundle's size,
+and the zip and setup `.exe` grow by about that much — tens of megabytes, which is what a
+self-contained package costs.
+
+**Licensing — read this before the first customer-facing bundle.** Ghostscript is
+AGPL-3.0. Putting its binaries in your package conveys them, which obliges whoever ships
+it to carry the licence text *and* the corresponding source, or to hold a commercial
+licence from Artifex. The build copies any licence file beside the binaries and writes
+`ghostscript\SOURCE-OFFER.txt`: the version bundled, where Artifex publishes the matching
+source, and the address recipients should write to, taken from `-SourceOfferContact`. Omit
+that and the file reads *NOT SET*. What the build produces is a **record** of a written
+offer, not the offer itself — section 6 of AGPL-3.0 requires the distributor to honour it
+for at least three years from the last distribution. So a release that ships the bundle is
+not, on that basis alone, licence-compliant: fill in the contact, or hold a commercial
+licence from Artifex.
+
+The two routes that avoid the question are `-NoGhostscript` with Ghostscript installed on
+the till, and the `Generic / Text Only` capture path, which needs no Ghostscript at all.
 
 ### What gets signed
 
@@ -180,8 +212,12 @@ service).
 The following is **not** covered by the Linux test suite and must be checked once
 per release on a Windows machine:
 
-1. `build-release.ps1 -Version <v> -PfxPath <pfx>` completes and creates the zip
-   and setup `.exe`.
+1. `build-release.ps1 -Version <v> -PfxPath <pfx> -SourceOfferContact <address>` completes and
+   creates the zip and setup `.exe`. Open the zip: `ghostscript\bin\gswin64c.exe`,
+   `ghostscript\Resource`, the licence text and `ghostscript\SOURCE-OFFER.txt` are inside, and
+   the offer names the version that shipped plus the contact passed to `-SourceOfferContact`. On a host with no
+   Ghostscript the same command must **fail** with the "No 64-bit Ghostscript to bundle"
+   message — that is the guard, not a bug to work around by adding `-NoGhostscript`.
 2. `signtool verify /pa /v dist\PrintInterceptor-<v>-setup.exe` and the same for
    `publish\PrintInterceptor.exe` report a valid timestamped signature.
 3. Silent install on a clean VM: printer and port exist, `Get-Service
@@ -189,7 +225,9 @@ per release on a Windows machine:
    scope, and only Administrators/SYSTEM can read `config.json`.
 4. Print a POS receipt to the virtual printer: it is fiscalised and printed on the
    real till printer; the tray/jobs window and *Fiscal status* agree with
-   FiscalBridge's Fiscal Device page.
+   FiscalBridge's Fiscal Device page. Do it once with `install.ps1 -PrinterMode PostScript`
+   on a VM that never had Ghostscript, to prove the bundled `{app}\ghostscript` is the copy
+   being decoded rather than a system install.
 5. Parse profiles: `install.ps1` reports the profiles shipped in `{app}\profiles`,
    Settings lists **sage** and **zohobooks**, *Use this profile* writes their rules into
    `config.json`, and *Import…* / *Save current rules as…* round-trip a file — including
