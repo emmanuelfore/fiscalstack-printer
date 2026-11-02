@@ -92,6 +92,20 @@ foreach ($script in @(
 # offer honoured for at least three years from the last distribution, which no
 # build script can sign for the distributor. -NoGhostscript skips the bundle,
 # which is the choice for a Generic / Text Only deployment.
+function ConvertTo-GhostscriptVersion {
+    param([string]$FolderName)
+
+    # gs10.08.0 -> 10.08.0. Anything the version cast rejects (rc tags, hand-named
+    # folders) compares as 0.0 so a recognisable install always wins.
+    $digits = ($FolderName -replace "^gs", "") -replace "[^0-9\.]+.*$", ""
+    try {
+        return [Version]$digits
+    }
+    catch {
+        return (New-Object Version -ArgumentList 0, 0)
+    }
+}
+
 function Resolve-GhostscriptInstall {
     param([string]$ExplicitDir)
 
@@ -114,9 +128,12 @@ function Resolve-GhostscriptInstall {
     foreach ($root in @("${env:ProgramFiles}\gs", "${env:ProgramFiles(x86)}\gs")) {
         if (-not (Test-Path $root)) { continue }
 
+        # "Newest" means newest by the version in the folder name. As text,
+        # gs9.53.3 sorts above gs10.08.0, and that order would bundle an old,
+        # unpatched Ghostscript into every till.
         $found = Get-ChildItem -Path $root -Directory -Filter "gs*" -ErrorAction SilentlyContinue |
             Where-Object { Test-Path (Join-Path $_.FullName "bin\gswin64c.exe") } |
-            Sort-Object Name -Descending |
+            Sort-Object { ConvertTo-GhostscriptVersion $_.Name } -Descending |
             Select-Object -First 1
         if ($found) { return $found.FullName }
     }
