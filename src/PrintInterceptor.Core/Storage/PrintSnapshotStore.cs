@@ -84,6 +84,13 @@ public sealed class PrintSnapshotStore
         }
     }
 
+    /// <summary>
+    /// The document as issued, from the reprint snapshot when it is still there and from the
+    /// fiscal archive when retention has pruned it. A day report needs the bucket split of a
+    /// receipt it printed months ago, and the archive is the copy that is never deleted.
+    /// </summary>
+    public ReceiptPrintModel? LoadDurable(string hash) => Load(hash) ?? _archive.LoadByHash(hash);
+
     public void Prune()
     {
         if (_retentionDays <= 0 || !Directory.Exists(_directory))

@@ -24,7 +24,8 @@ POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
         ├─ fiscalise: POST /api/v1/fiscalize (X-API-Key)
         │            └─ unreachable + offline.enabled → sign, queue, print
         ├─ sync    : queued signatures oldest-first when the API returns
-        └─ print   : GDI thermal receipt or A4 invoice (Modern Blue layout)
+        ├─ print   : GDI thermal receipt or A4 invoice (Modern Blue layout)
+        └─ report  : the day's fiscal position + the accountant's CSV, from local state
 ```
 
 ## Requirements
@@ -116,7 +117,8 @@ most:
 | `company` | Printed on the fiscal document. `email` and `logoPath` are used by the A4 layout; `logoPath` is relative to the config folder. |
 | `parse.*` | The layout rules for this POS: markers, labels, keywords, date formats, line patterns and tolerances. See [Parsing profiles](#parsing-profiles). |
 | `offline.enabled` | Sign receipts on the till when the API is unreachable. Everything it needs (device, key, taxes, counters) is provisioned from FiscalStack with the API key; see [Offline signing](#offline-signing). |
-| `storage.retentionDays` | How long decoded and raw jobs are kept. |
+| `storage.retentionDays` | How long decoded and raw jobs are kept. The reconcile replay needs this folder; see [Reconciling an unknown receipt](#reconciling-an-unknown-receipt). |
+| `reconcile.*` | How the app resolves a fiscalisation whose answer it could not read. See [Reconciling an unknown receipt](#reconciling-an-unknown-receipt). |
 
 `parse.vatFlag` follows FiscalStack convention: `"1"` means printed prices include VAT,
 `"0"` means VAT is added on top. `parse.productStartLine` / `productEndLine` support
@@ -169,7 +171,8 @@ the same name:
 In **Settings → Receipt parsing profile**: pick one and press **Use this profile**,
 **Import…** a file received from another till, or **Save current rules as…** to capture what
 this till is reading correctly today and hand it to the next one. The tray menu has
-*Import receipt parse profile…* and *Open parse profiles folder*.
+*Import receipt parse profile…*, *Capture receipt layout from a job…* (below) and
+*Open parse profiles folder*.
 
 Applying writes the resolved rules into `config.json` and records the name in `parse.profile`
 as provenance. The configuration stays the single source of truth, so deleting a profile file
@@ -191,6 +194,34 @@ type other than `STANDARD`, `ZERO_RATED` or `EXEMPT`, or uses a
 name that could escape the profiles folder. Every pattern also runs under
 `parse.limits.regexTimeoutMilliseconds` (1000 by default): a hand-written expression that
 backtracks forever holds that one job for review instead of stalling the till.
+
+### Capturing a profile from a job the till already caught
+
+A new POS is usually discovered by failure: a job lands in **Needs review** because no rule
+describes its layout. *Capture receipt layout from a job…* (tray menu) turns that job into the
+profile instead of making someone hand-write one:
+
+- Pick a job from the dropdown — the receipts this till kept, newest first — or **From file…**
+  a saved printout. The text is shown exactly as it arrived and stays editable, so a receipt
+  from another branch can be pasted in.
+- **Analyse** parses the same receipt twice and puts the two readings side by side: what the
+  rules in use read now, and what the profile being suggested would read. Every field carries
+  the line number it came from, or *— not read —* in red. That preview is the acceptance test;
+  nothing is saved on a promise.
+- Each rule the profile adds is listed with the values it writes, the line that proves it, and
+  why it is needed — "'ITEM' and 'QTY' are the columns your POS prints; the built-in words are
+  not on that line".
+- **What a profile cannot decide** holds the rest: a tax code printed after an amount that names
+  no bucket (a receipt cannot say which VAT bucket `G` means), a word like `STORNO` that would
+  change what the document *is*, a printed total announced by words the parser does not read, and
+  any suggestion the preview still cannot read. Those are reported for Settings, never written
+  into the file — a guess about a credit note files an ordinary sale as a return.
+
+**Save profile** writes it to `%ProgramData%\…\profiles\<id>.json`; **Save and use now** also
+applies it and records it in `config.json`, which still needs a restart before it parses.
+Because a profile states only differences, the file contains the labels and column words this
+POS adds, not a copy of the built-in rules — and a rule whose marker the parser would find on
+the wrong line (a footer word that also names a column, like `Total`) is never offered.
 
 ### VAT status on the line
 
@@ -252,6 +283,9 @@ tokens as amounts, so such a rule would silently do nothing.
 
 # Custom config path
 .\publish\PrintInterceptor.exe --console --config C:\path\config.json
+
+# The day's fiscal report, from a till that runs headless as a service
+.\publish\PrintInterceptor.exe --day-report=2026-10-31 --csv=D:\fiscal\2026-10-31.csv
 ```
 
 Configuration can also be selected with the `PRINTINTERCEPTOR_CONFIG` environment variable.
@@ -273,10 +307,12 @@ so choose one mode per till.
   the API state, fiscal day, queued receipts and any receipts held for review.
 - **Menu:** live API status, fiscal day number/state, *Open fiscal day…* / *Close fiscal day…*
   (enabled from the live state), queue size, receipts needing review, *Resume offline sync*
-  (only while paused), *Sync offline receipts now*, *Fiscal status…*, *Fiscalisation jobs…*,
+  (only while paused), *Sync offline receipts now*, *Reconcile unknown receipts now*,
+  *Fiscal status…*, *Fiscalisation jobs…*, *Daily Z-shift summary…*,
   *Test connection*, *Settings…*, open the config / logs / data / parse-profile folders,
-  *Import receipt parse profile…*, *Start with Windows*, *Exit*. Day open/close asks for
-  confirmation and reports the gateway's answer; the device state is polled every 30 seconds.
+  *Import receipt parse profile…*, *Capture receipt layout from a job…*, *Start with Windows*,
+  *Exit*. Day open/close asks for confirmation and reports the gateway's answer; the device state
+  is polled every 30 seconds.
 - **Notifications** (balloons on transition, not repeatedly): a fiscal day close failed, the
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
@@ -327,6 +363,74 @@ that fails leaves the day open with its error code visible so it can be retried:
 
 Fix the underlying receipts in FiscalStack before retrying; the print queue cannot fix a
 rejected fiscal day on its own.
+
+### Daily Z-shift summary and accountant export
+
+*Daily Z-shift summary…* opens the day's fiscal position as this till knows it: the documents it
+fiscalised, their VAT buckets, the receipt numbers they carry, and everything still outstanding.
+Pick a business date with the date control (or **Previous day** / **Next day**), then
+**Save summary…** for the printable text and **Export lines (CSV)…** for the accountant's file
+(`fiscal-day-<date>.txt`, `fiscal-lines-<date>.csv`).
+
+The report reads local state only — the [job ledger](#failure-handling) for the date plus the
+printed fiscal copy behind each document (the snapshot in `state/print-snapshots`, or the durable
+copy in `fiscalised/<date>/` when the snapshot has been pruned). It never calls the network and
+needs no API key, so it works with the line down, and nothing in the window can alter a fiscal
+document; it is a statement of what was already issued.
+
+| Section | What it says |
+| --- | --- |
+| Identity | Company, TIN, VAT number, device id and serial, fiscal day number, the first–last receipt numbers and counters printed that day, and every currency seen. |
+| SALES / CREDIT NOTES / DEBIT NOTES | One table per kind: net, tax and gross per VAT bucket, with the document count. Corrections never sit inside the sales buckets. |
+| DAY POSITION | Gross sales, the credit and debit notes against them, the day's net and tax, and any gross that is deliberately outside the totals. |
+| NOT FISCALISED FOR THIS DATE | Held for review, rejected, outcome unknown, in flight — the documents that are not at the tax authority yet. Offline receipts that are signed and still waiting to sync are counted as issued, and listed separately. |
+| NOTES | Every reason a number in this report is smaller than the till roll, in the report itself. |
+
+Honest figures, by construction:
+
+- A document is counted as issued from its ledger entry. If its printed copy is no longer on this
+  till, its gross is reported as **Issued, no copy** and its buckets, lines and tax are *not*
+  estimated — the notes name those invoices.
+- A document whose own tax rows do not add up to its printed total is flagged in the report and
+  logged rather than quietly balanced.
+- Credit and debit notes are kept in their own kind, and their buckets are signed to agree with
+  the document, so a gateway that returns magnitudes cannot make the day's VAT larger than it is.
+- A date with more than one currency is announced; the totals are added as printed, never
+  converted.
+
+The CSV has one row per printed line of every fiscalised document whose copy is readable here, so
+it can be pivoted by bucket, receipt or device without joins:
+
+```text
+businessDate, invoiceNumber, transactionType, receiptNumber, receiptCounter, receiptGlobalNo,
+fiscalDayNo, fiscalCode, deviceId, deviceSerialNo, currency, signedOffline, buyerName, buyerTin,
+line, quantity, unitPrice, lineTotal, taxType, taxRatePercent
+```
+
+It is CRLF with a UTF-8 byte-order mark so Excel opens it straight, and any cell that begins with
+`=`, `@`, `+` or a control character is prefixed with `'` — a product name typed at the counter
+cannot arrive in the spreadsheet as a formula. Exporting a date with no readable lines writes
+nothing and says so, instead of producing an empty file that looks like a nil return.
+
+A till that runs only as a Windows service has no tray to open, so the same report is available
+from a terminal — the summary goes to stdout, progress and errors to stderr, and the exit code is
+`0` (report written), `2` (bad date or path), `3` (no lines to export) or `1` (the file could not
+be written):
+
+```powershell
+# Today, on screen
+.\publish\PrintInterceptor.exe --day-report
+
+# A closed day, with the accountant's export beside it
+.\publish\PrintInterceptor.exe --day-report=2026-10-31 --csv=D:\fiscal\2026-10-31.csv
+
+# Redirected straight to a file for the bookkeeper
+.\publish\PrintInterceptor.exe --day-report=2026-10-31 > D:\fiscal\day-2026-10-31.txt
+```
+
+Run it before **Close fiscal day**: if the notes list a job whose outcome is unknown, run
+*Reconcile unknown receipts now* first, so the day is reported closed on figures the till can
+actually read.
 
 ## Company identity
 
@@ -571,6 +675,44 @@ body [paymentMethod: Invalid enum value. Expected 'CASH' | 'CARD' | 'MOBILE' | '
 The `offline*` fields on a queued receipt are ours, not the schema's: the gateway ignores
 them and assigns the next ZIMRA counters when it processes the sync.
 
+## Returns, refunds and corrections
+
+A return is the one document that can quietly file VAT on money that went back to the
+customer, so the parser decides *what the document is* before anything is sent. The gateway
+signs a correction from `transactionType` — it takes positive `quantity` and `unitPrice` on
+every line and negates the totals itself for a credit note — and it answers `400` for a
+correction that carries no `relatedInvoiceNumber`, because ZIMRA has no other way to tie the
+two documents together.
+
+Three signals type a document, in the order the paper actually states them:
+
+1. **A word above the items** — `parse.corrections.creditNoteKeywords` / `debitNoteKeywords`,
+   matched as whole words. `RETURN`, `REFUND`, `REVERSAL`, `CREDIT NOTE` …
+2. **Its own number** — `parse.corrections.creditNoteNumberPrefixes` (`CR`, `CN` by default)
+   types a slip the POS numbers as a correction.
+3. **A negative total** — `parse.corrections.negativeTotalMeansCreditNote` (default `true`)
+   files a slip whose printed amounts are negative as a credit note and warns that the
+   wording is missing, which is the hint to add it to the profile.
+
+| Situation | Result |
+| --- | --- |
+| A correction with no original invoice number printed | `NeedsReview` — nothing is sent, and the reason names `parse.corrections.originalInvoiceLabels` because a missing reference is a profile gap |
+| A correction with no printed reason | Fiscalised with a generic reason and a warning; the gateway demands the field |
+| A slip mixing a sale line and a negative line | `NeedsReview` — the gateway totals from positive prices, so one of the two would be filed wrongly. The POS has to print the return as its own credit note |
+| Every line negative | `CreditNote`, in its own signed total |
+| `NO RETURNS AFTER 7 DAYS` in the footer | Still a sale: only the part printed above the items announces a document type, and `RETURNS` is not the word `RETURN` anyway |
+| An item called `Brass Return Coupling` | Still a sale — same reason |
+| The credit note prints the original's number as its own | `parse.corrections.originalInvoiceLabels` lines are excluded from the number search, so the correction is never filed under the sale it reverses |
+| A reprint of a fiscalised sale that is actually a return | The ledger keys duplicate protection on invoice number **and** document type, so a credit note on a used number is not suppressed as a duplicate print |
+
+The vocabulary is data, so a new POS is still a profile: `parse.corrections` travels with a
+captured profile like the rest of the layout rules. A keyword list written as `[]` means
+"this POS never prints the word" and the type then comes from the number or the sign alone.
+A keyword with no letters, a prefix shorter than two letters (it would type ordinary invoice
+numbers), a word listed as both credit and debit, or a blank label are rejected at load and
+import. Line guards are checked on magnitudes, so a `-1.00M-100.00` row is rejected for the
+same arithmetic its positive twin passes.
+
 ## Duplicate protection
 
 Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately strict:
@@ -579,8 +721,10 @@ Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately
    an atomic replace. If the process dies mid-request, the entry stays blocking rather than
    silently retrying.
 2. A job is skipped when its **text hash** was already processed, or when the same
-   **invoice number + business date** was already fiscalised. POS invoice numbers reset
-   daily, so the date is part of the key.
+   **invoice number + business date + document type** was already fiscalised. POS invoice
+   numbers reset daily, so the date is part of the key, and a credit note that reuses the
+   original's number is a different document rather than a second print. An entry written
+   before the distinction existed blocks every type.
 3. `InFlight`, `Fiscalised`, `FiscalisedOffline` and `AmbiguousFailure` entries block
    re-fiscalisation. `Rejected` and `NeedsReview` do not.
 4. A receipt signed offline is also blocked by its queue file: it stays claimed until the
@@ -590,10 +734,10 @@ Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately
 
 | Situation | Result |
 | --- | --- |
-| No line items, totals mismatch, non-positive parsed total, no API key | `NeedsReview` — nothing is sent |
-| Credit note or debit note without an original invoice reference | `Rejected` by the gateway's early field check; the correction is never stored, so it can be re-sent once the reference is on the document |
+| No line items, totals mismatch, a parsed total of zero, no API key | `NeedsReview` — nothing is sent |
+| A correction with no original invoice reference, or a slip that mixes a sale with a return | `NeedsReview` — the parser holds it before anything is sent, so nothing has to be undone once the document is fixed |
 | API returns 4xx or `success=false` | `Rejected` — job is not retried automatically |
-| Timeout, connection failure, 5xx, unreadable 2xx | `AmbiguousFailure` — **never retried automatically**, because the receipt may already exist at ZIMRA |
+| Timeout, connection failure, 5xx, unreadable 2xx | `AmbiguousFailure` — **never retried automatically**, because the receipt may already exist at ZIMRA. [Reconciliation](#reconciling-an-unknown-receipt) settles it |
 | API unreachable and `offline.enabled` | Signed offline, queued and printed; retried only by the sync loop |
 | Offline signing requested but key missing/invalid | `NeedsReview`; the reason is logged and shown at startup |
 | Offline sync rejected | Receipt moved to `offline-failed`; the queue is paused durably until reconciled and resumed from the tray. Most often the fiscal day closed while it was queued |
@@ -605,6 +749,56 @@ A corrupt `ledger.json` or `fiscal-chain.json` stops startup instead of guessing
 only after verifying with FiscalStack that no captured job is unaccounted for. Deleting
 `fiscal-chain.json` while offline receipts are queued will break counter matching — sync or
 reconcile the queue first.
+
+## Reconciling an unknown receipt
+
+A timeout, a dropped connection or a `5xx` says only that the till never got an answer. The
+sale may already sit in ZIMRA with a receipt number against it, which is why such a job is
+never retried on its own: a second `POST /fiscalize` would be a second fiscal document for
+one basket of goods. Reconciliation is the pass that finds out which it was, and it is the
+only route by which an `AmbiguousFailure` job stops blocking its invoice number.
+
+It reads the tenant's own invoice list — `GET /api/v1/invoices?page=N&limit=100`, newest
+first — because that is the answer the gateway can give for a receipt the till never got an
+id for, and it acts on three outcomes:
+
+| What the server says | What happens |
+| --- | --- |
+| The receipt is there, and its total matches the parsed receipt | The gateway's proof is **adopted**: the job becomes `Fiscalised` with the server's fiscal code, QR data, receipt and day numbers, and the fiscal copy the customer never got is printed. |
+| The receipt is not there | The **exact body that timed out** is replayed, read back from `jobs/<date>/<hash>.request.json` and sent byte for byte, so the gateway sees the same invoice number, lines and totals it was already being shown. A success marks the job fiscalised and prints. |
+| The replay is refused `409 DUPLICATE_INVOICE` | The receipt landed after the list was read, so the list is read again and the proof adopted — not reported as a rejection. |
+
+The rest of the table is what reconcile refuses to do, and each refusal exists because the
+alternative is a fiscal problem nobody can undo:
+
+- **A list that cannot be read is not an answer.** A `5xx`, a non-JSON body, or a page the
+  client cannot parse leaves the job blocked. Nothing is sent on an answer that means nothing.
+- **A total that does not match is not adopted.** The invoice number is the only thing looked
+  up, so a match within 5 cent is required before someone else's receipt is written into the
+  ledger and printed on this till. A mismatch becomes `NeedsReview`.
+- **A job whose receipt text shows no invoice number is never replayed.** The gateway
+  auto-numbers a request that carries none, so a replay would create a second sale under a
+  fresh number that its own duplicate check cannot see. It stays blocked and is logged for the
+  dashboard.
+- **Nothing is unblocked by an exhausted scan.** `scanPages` bounds how far back the newest-first
+  walk goes; a receipt older than the window is reported as such rather than assumed absent.
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `reconcile.enabled` | `true` | Runs the automatic passes; *Reconcile unknown receipts now* works regardless. |
+| `reconcile.intervalMinutes` | `15` | Minutes between background passes. `0` means startup and the tray only. |
+| `reconcile.autoResend` | `true` | Replay a receipt the server has never heard of. `false` = only adopt the server's proof, never send. |
+| `reconcile.maxAttempts` | `3` | Passes per job before it is left for the operator. The tray action ignores the budget. |
+| `reconcile.scanPages` | `10` | Pages of 100 invoices the lookup reads, newest first. |
+
+A pass runs at startup, then every `intervalMinutes`, and on demand from the tray; one pass at
+a time, so a slow server cannot stack them. Adopted proofs print without a verification code
+because the list route does not carry one — the fiscal code, QR data and receipt numbers on the
+paper are the gateway's own, and the full document is in FiscalStack. Reconciliation is also
+honest when retention is off: with `reconcile.autoResend` `false` (or `storage.retainJobs`
+`false`, which the config rejects against `autoResend` for good reason) the lookup still
+settles receipts that exist, and a receipt the server does not have is set aside as
+`NeedsReview` naming `storage.retainJobs` rather than silently dropped.
 
 ## Limitations
 

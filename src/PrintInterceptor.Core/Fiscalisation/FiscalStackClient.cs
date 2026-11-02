@@ -514,6 +514,15 @@ public sealed class FiscalStackClient : IDisposable
 
     private static long? ToLong(string? value) => long.TryParse(value, out var parsed) ? parsed : null;
 
+    private static decimal? ToDecimal(string? value) =>
+        decimal.TryParse(
+            value,
+            System.Globalization.NumberStyles.Number,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed)
+            ? parsed
+            : null;
+
     private static DateTimeOffset? ToDate(string? value) =>
         DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
 
@@ -584,6 +593,19 @@ public sealed class FiscalStackClient : IDisposable
                 $"The request could not be serialised: {ex.Message}", null);
         }
 
+        return await PostFiscalizeAsync(requestJson, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends a body that was serialised once already. Reconciling a receipt that timed out has
+    /// to replay the exact request the gateway may or may not have seen: rebuilding it from the
+    /// receipt text could hand ZIMRA different lines or a different total than the first attempt.
+    /// </summary>
+    public Task<FiscalizeOutcome> FiscaliseRawAsync(string requestJson, CancellationToken cancellationToken) =>
+        PostFiscalizeAsync(requestJson, cancellationToken);
+
+    private async Task<FiscalizeOutcome> PostFiscalizeAsync(string requestJson, CancellationToken cancellationToken)
+    {
         _log.Info($"Fiscalisation request: {SummariseRequest(requestJson)}");
 
         try
@@ -659,6 +681,127 @@ public sealed class FiscalStackClient : IDisposable
             return new FiscalizeOutcome(FiscalizeOutcomeStatus.Ambiguous, null, ex.Message, null);
         }
     }
+
+    private const int InvoicePageSize = 100;
+
+    /// <summary>
+    /// Looks for a fiscalised invoice among the tenant's own records. The paginated list is the
+    /// only authoritative read an API key grants — there is no lookup by invoice number and a
+    /// duplicate response names the number without returning the receipt. The list is newest
+    /// first, so today's sale is on the first page; <paramref name="scanPages"/> bounds the walk.
+    /// </summary>
+    public async Task<InvoiceLookup> FindInvoiceAsync(
+        string invoiceNumber,
+        int scanPages,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(invoiceNumber))
+        {
+            return new InvoiceLookup(InvoiceLookupStatus.Failed, null, "There is no invoice number to look for.", 0);
+        }
+
+        var pagesRead = 0;
+        for (var page = 1; page <= Math.Max(1, scanPages); page++)
+        {
+            JsonDocument document;
+            try
+            {
+                using var response = await _http.GetAsync(PageUri(page), cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    return new InvoiceLookup(InvoiceLookupStatus.Failed, null,
+                        $"The invoice list returned HTTP {(int)response.StatusCode}.", pagesRead);
+                }
+
+                try
+                {
+                    document = JsonDocument.Parse(body);
+                }
+                catch (JsonException)
+                {
+                    return new InvoiceLookup(InvoiceLookupStatus.Failed, null,
+                        "The invoice list could not be read.", pagesRead);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return new InvoiceLookup(InvoiceLookupStatus.Failed, null, ex.Message, pagesRead);
+            }
+
+            using (document)
+            {
+                var root = document.RootElement;
+                var data = ArrayProperty(root, "data");
+                if (data is null)
+                {
+                    return new InvoiceLookup(InvoiceLookupStatus.Failed, null,
+                        "The invoice list did not carry a page of invoices.", pagesRead);
+                }
+
+                pagesRead++;
+
+                foreach (var element in data.Value.EnumerateArray())
+                {
+                    var number = Scalar(element, "invoiceNumber");
+                    if (string.Equals(number, invoiceNumber, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new InvoiceLookup(
+                            InvoiceLookupStatus.Found, ToRecord(element, number!), null, pagesRead);
+                    }
+                }
+
+                var totalPages = ToInt(Scalar(root, "pages")) ?? page;
+                if (data.Value.GetArrayLength() == 0 || page >= totalPages)
+                {
+                    return new InvoiceLookup(InvoiceLookupStatus.Absent, null, null, pagesRead);
+                }
+            }
+        }
+
+        return new InvoiceLookup(InvoiceLookupStatus.Absent, null,
+            $"The walk stopped after {pagesRead} page(s).", pagesRead, WindowExhausted: true);
+    }
+
+    private Uri PageUri(int page) =>
+        new(Resolve("invoices").ToString() + $"?page={page}&limit={InvoicePageSize}", UriKind.Absolute);
+
+    private static JsonElement? ArrayProperty(JsonElement root, string name)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase) &&
+                property.Value.ValueKind == JsonValueKind.Array)
+            {
+                return property.Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static InvoiceRecord ToRecord(JsonElement element, string invoiceNumber) => new(
+        ToInt(Scalar(element, "id")) ?? 0,
+        invoiceNumber,
+        Scalar(element, "status"),
+        Scalar(element, "transactionType"),
+        Scalar(element, "currency"),
+        ToDecimal(Scalar(element, "total")),
+        Scalar(element, "fiscalCode"),
+        Scalar(element, "qrCodeData"),
+        ToInt(Scalar(element, "receiptGlobalNo")),
+        ToInt(Scalar(element, "receiptCounter")),
+        ToInt(Scalar(element, "fiscalDayNo")),
+        Scalar(element, "issueDate"));
 
     public void Dispose()
     {

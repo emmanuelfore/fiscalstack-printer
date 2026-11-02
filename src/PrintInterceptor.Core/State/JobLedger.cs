@@ -20,6 +20,14 @@ public sealed class LedgerEntry
     public string Hash { get; set; } = "";
     public string? InvoiceNumber { get; set; }
     public string BusinessDate { get; set; } = "";
+
+    /// <summary>
+    /// What kind of document claimed this number: a sale, or a correction of another one.
+    /// A credit note that reprints the original's invoice number is a different document, and
+    /// blocking it here would drop a legitimate return without ever asking the gateway.
+    /// Null means the entry predates the distinction, and it blocks every kind.
+    /// </summary>
+    public string? TransactionType { get; set; }
     public LedgerStatus Status { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -45,6 +53,10 @@ public sealed class LedgerEntry
     public int DuplicateAttemptCount { get; set; }
     public DateTimeOffset? LastDuplicateAttemptAt { get; set; }
     public string? LastDuplicateAttemptHash { get; set; }
+
+    /// <summary>Reconciliation passes this job has had. Bounded so a lost receipt cannot poll forever.</summary>
+    public int ReconcileAttempts { get; set; }
+    public DateTimeOffset? LastReconcileAt { get; set; }
 }
 
 internal sealed class LedgerDocument
@@ -115,6 +127,24 @@ public sealed class JobLedger
         }
     }
 
+    /// <summary>
+    /// Every job booked against one business date (<c>yyyyMMdd</c>), oldest first, which is the
+    /// set a day report totals. Ordered by the receipt counter so the fiscal sequence reads in the
+    /// order the documents were issued rather than the order the till happened to print them.
+    /// </summary>
+    public IReadOnlyList<LedgerEntry> ForBusinessDate(string businessDateKey)
+    {
+        lock (_gate)
+        {
+            return _document.Entries.Values
+                .Where(entry => string.Equals(entry.BusinessDate, businessDateKey, StringComparison.Ordinal))
+                .OrderBy(entry => entry.ReceiptGlobalNo ?? long.MaxValue)
+                .ThenBy(entry => entry.CreatedAt)
+                .Select(Clone)
+                .ToList();
+        }
+    }
+
     public int Count(LedgerStatus status)
     {
         lock (_gate)
@@ -174,6 +204,86 @@ public sealed class JobLedger
     private static bool IsPrintFailure(LedgerEntry entry) =>
         entry.PrintStatus is "Failed" or "ReprintFailed";
 
+    /// <summary>
+    /// Jobs whose fiscalisation outcome is unknown, oldest first. An entry still marked InFlight
+    /// belongs too, once it has not moved for longer than a request can take: the process died
+    /// between the claim and the answer, which is the same unknown. The anchor is UpdatedAt, the
+    /// claim's own timestamp, so a job being fiscalised right now is never reconciled alongside.
+    /// Entries that have spent their budget drop out and become the operator's task, which is
+    /// what a manual pass is for.
+    /// </summary>
+    public IReadOnlyList<LedgerEntry> PendingReconcile(
+        int limit,
+        int maxAttempts,
+        DateTimeOffset now,
+        TimeSpan inFlightGrace)
+    {
+        lock (_gate)
+        {
+            return _document.Entries.Values
+                .Where(entry => entry.ReconcileAttempts < maxAttempts)
+                .Where(entry => entry.Status == LedgerStatus.AmbiguousFailure ||
+                                (entry.Status == LedgerStatus.InFlight && now - entry.UpdatedAt > inFlightGrace))
+                .OrderBy(entry => entry.UpdatedAt)
+                .Take(Math.Max(1, limit))
+                .Select(Clone)
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// Books the attempt before the pass runs, so a crash halfway through still counts against
+    /// the budget instead of replaying the same pass on every restart. UpdatedAt deliberately
+    /// stays put: it is what marks an in-flight job as live.
+    /// </summary>
+    public void RecordReconcileAttempt(string hash)
+    {
+        lock (_gate)
+        {
+            if (!_document.Entries.TryGetValue(hash, out var entry))
+            {
+                return;
+            }
+
+            entry.ReconcileAttempts++;
+            entry.LastReconcileAt = DateTimeOffset.Now;
+            SaveLocked();
+        }
+    }
+
+    /// <summary>
+    /// Adopts the proof the server already holds. The invoice list returns the fiscal code, the
+    /// QR data and the ZIMRA counters but no verification code, so a receipt reconstructed this
+    /// way prints without one.
+    /// </summary>
+    public void MarkFiscalisedFromServer(string hash, InvoiceRecord invoice)
+    {
+        lock (_gate)
+        {
+            if (!_document.Entries.TryGetValue(hash, out var entry))
+            {
+                _log.Error(
+                    $"Reconciliation found invoice {invoice.InvoiceNumber} but ledger entry " +
+                    $"{Short(hash)} no longer exists; the proof was not adopted.");
+                return;
+            }
+
+            entry.Status = LedgerStatus.Fiscalised;
+            entry.FiscalCode = invoice.FiscalCode ?? entry.FiscalCode;
+            entry.QrCode = invoice.QrCode ?? entry.QrCode;
+            entry.ReceiptNumber = invoice.ReceiptGlobalNo ?? entry.ReceiptNumber;
+            entry.ReceiptCounter = invoice.ReceiptCounter ?? entry.ReceiptCounter;
+            entry.ReceiptGlobalNo = invoice.ReceiptGlobalNo ?? entry.ReceiptGlobalNo;
+            entry.FiscalDayNo = invoice.FiscalDayNo ?? entry.FiscalDayNo;
+            entry.InvoiceNumber = invoice.InvoiceNumber;
+            entry.Total = invoice.Total ?? entry.Total;
+            entry.Currency = invoice.Currency ?? entry.Currency;
+            entry.Error = null;
+            entry.UpdatedAt = DateTimeOffset.Now;
+            SaveLocked();
+        }
+    }
+
     private static bool IsMoreRecent(LedgerEntry candidate, LedgerEntry? current) =>
         current is null || candidate.UpdatedAt > current.UpdatedAt;
 
@@ -187,7 +297,13 @@ public sealed class JobLedger
         }
     }
 
-    public LedgerEntry? FindBlockingByInvoice(string? invoiceNumber, string businessDate)
+    /// <summary>
+    /// The blocking record for this document number on this business date, when one of the
+    /// same kind already owns it. A sale and a credit note carrying the same number are
+    /// different documents; the gateway still refuses the second one, but it refuses it out
+    /// loud, with the original receipt behind the answer.
+    /// </summary>
+    public LedgerEntry? FindBlockingByInvoice(string? invoiceNumber, string businessDate, string? transactionType)
     {
         if (string.IsNullOrWhiteSpace(invoiceNumber))
         {
@@ -200,6 +316,7 @@ public sealed class JobLedger
                 .Where(entry => IsBlocking(entry.Status))
                 .Where(entry => string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase))
                 .Where(entry => entry.BusinessDate == businessDate)
+                .Where(entry => SameDocumentKind(entry, transactionType))
                 .OrderByDescending(entry => entry.UpdatedAt)
                 .Select(Clone)
                 .FirstOrDefault();
@@ -231,7 +348,8 @@ public sealed class JobLedger
 
             _log.Warn(
                 $"DUPLICATE PRINT SUPPRESSED: invoice={entry.InvoiceNumber ?? "-"} " +
-                $"businessDate={entry.BusinessDate} duplicateJob={Short(duplicateHash)} " +
+                $"businessDate={entry.BusinessDate} type={entry.TransactionType ?? "-"} " +
+                $"duplicateJob={Short(duplicateHash)} " +
                 $"originalJob={Short(entry.Hash)} originalStatus={entry.Status} " +
                 $"fiscalCode={entry.FiscalCode ?? "-"} receiptNo={entry.ReceiptNumber?.ToString() ?? "-"} " +
                 $"attempts={entry.DuplicateAttemptCount}. No second fiscal receipt was created.");
@@ -248,7 +366,8 @@ public sealed class JobLedger
         string businessDate,
         string? sourceFile,
         decimal total,
-        string currency)
+        string currency,
+        string? transactionType)
     {
         lock (_gate)
         {
@@ -257,7 +376,7 @@ public sealed class JobLedger
                 return false;
             }
 
-            if (FindBlockingByInvoiceLocked(invoiceNumber, businessDate) is not null)
+            if (FindBlockingByInvoiceLocked(invoiceNumber, businessDate, transactionType) is not null)
             {
                 return false;
             }
@@ -266,6 +385,7 @@ public sealed class JobLedger
             var entry = existing ?? new LedgerEntry { Hash = hash, CreatedAt = now };
             entry.InvoiceNumber = invoiceNumber;
             entry.BusinessDate = businessDate;
+            entry.TransactionType = transactionType;
             entry.Status = LedgerStatus.InFlight;
             entry.Total = total;
             entry.Currency = currency;
@@ -274,6 +394,10 @@ public sealed class JobLedger
             entry.UpdatedAt = now;
             entry.PrintStatus = "NotRequested";
             entry.PrintError = null;
+
+            // A fresh claim is a fresh outcome to reconcile, so the budget restarts with it.
+            entry.ReconcileAttempts = 0;
+            entry.LastReconcileAt = null;
 
             _document.Entries[hash] = entry;
             SaveLocked();
@@ -448,7 +572,7 @@ public sealed class JobLedger
         }
     }
 
-    private LedgerEntry? FindBlockingByInvoiceLocked(string? invoiceNumber, string businessDate)
+    private LedgerEntry? FindBlockingByInvoiceLocked(string? invoiceNumber, string businessDate, string? transactionType)
     {
         if (string.IsNullOrWhiteSpace(invoiceNumber))
         {
@@ -459,8 +583,13 @@ public sealed class JobLedger
             .Where(entry => IsBlocking(entry.Status))
             .FirstOrDefault(entry =>
                 string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase) &&
-                entry.BusinessDate == businessDate);
+                entry.BusinessDate == businessDate &&
+                SameDocumentKind(entry, transactionType));
     }
+
+    private static bool SameDocumentKind(LedgerEntry entry, string? transactionType) =>
+        entry.TransactionType is null ||
+        string.Equals(entry.TransactionType, transactionType ?? "FiscalInvoice", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsBlocking(LedgerStatus status) =>
         status is LedgerStatus.InFlight or LedgerStatus.Fiscalised or LedgerStatus.FiscalisedOffline
@@ -518,6 +647,7 @@ public sealed class JobLedger
         Hash = entry.Hash,
         InvoiceNumber = entry.InvoiceNumber,
         BusinessDate = entry.BusinessDate,
+        TransactionType = entry.TransactionType,
         Status = entry.Status,
         CreatedAt = entry.CreatedAt,
         UpdatedAt = entry.UpdatedAt,
@@ -540,6 +670,8 @@ public sealed class JobLedger
         ReprintCount = entry.ReprintCount,
         DuplicateAttemptCount = entry.DuplicateAttemptCount,
         LastDuplicateAttemptAt = entry.LastDuplicateAttemptAt,
-        LastDuplicateAttemptHash = entry.LastDuplicateAttemptHash
+        LastDuplicateAttemptHash = entry.LastDuplicateAttemptHash,
+        ReconcileAttempts = entry.ReconcileAttempts,
+        LastReconcileAt = entry.LastReconcileAt
     };
 }

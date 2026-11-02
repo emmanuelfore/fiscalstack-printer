@@ -28,13 +28,19 @@ public sealed class ReceiptParser
     private readonly Regex _twoLineNameAmountPattern;
     private readonly string[] _dateFormats;
     private readonly TaxMarkerReader _tax;
+    private readonly CorrectionVocabulary _corrections;
+    private readonly Regex[] _creditNoteKeywords;
+    private readonly Regex[] _debitNoteKeywords;
 
     public ReceiptParser(ParseConfig config)
     {
         _config = config;
         _tax = new TaxMarkerReader(config);
-
+        _corrections = config.Corrections ?? new CorrectionVocabulary();
         var timeout = TimeSpan.FromMilliseconds(config.Limits.RegexTimeoutMilliseconds);
+        _creditNoteKeywords = CompileKeywords(_corrections.CreditNoteKeywords, timeout);
+        _debitNoteKeywords = CompileKeywords(_corrections.DebitNoteKeywords, timeout);
+
         var patterns = config.Patterns;
         _dateFormats = config.DateFormats.ToArray();
         _emailPattern = Compile(patterns.Email, timeout, RegexOptions.None);
@@ -64,8 +70,58 @@ public sealed class ReceiptParser
         }
     }
 
-    private int MinItemTokens => _config.Limits.MinItemTokens;
+    /// <summary>
+    /// A correction keyword is matched as whole words, so "RETURN" announces a return but
+    /// "RETURNS" inside a printed returns policy does not, and a multi-word keyword still
+    /// matches when the fixed-width till roll wraps it across extra spaces.
+    /// </summary>
+    private static Regex[] CompileKeywords(List<string> keywords, TimeSpan timeout)
+    {
+        var compiled = new List<Regex>(keywords.Count);
+        foreach (var keyword in keywords)
+        {
+            var words = keyword.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length == 0)
+            {
+                continue;
+            }
 
+            var pattern = @"\b" + string.Join(@"\s+", words.Select(Regex.Escape)) + @"\b";
+            compiled.Add(Compile(pattern, timeout, RegexOptions.IgnoreCase));
+        }
+
+        return compiled.ToArray();
+    }
+
+    /// <summary>
+    /// True when one of the phrases appears in the part of the document that announces what it
+    /// is: everything printed above the item block. A POS prints "NO RETURNS AFTER 7 DAYS"
+    /// below the items as a policy, and that is a footer, not a document type.
+    /// </summary>
+    private static bool AnnouncedIn(string[] lines, int announcementEnd, Regex[] keywords)
+    {
+        var limit = Math.Min(announcementEnd, lines.Length);
+        for (var i = 0; i < limit; i++)
+        {
+            var line = lines[i];
+            if (line.Length == 0)
+            {
+                continue;
+            }
+
+            foreach (var keyword in keywords)
+            {
+                if (keyword.IsMatch(line))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private int MinItemTokens => _config.Limits.MinItemTokens;
     private decimal LineTolerance => _config.Limits.LineTolerance;
 
     /// <summary>
@@ -73,13 +129,20 @@ public sealed class ReceiptParser
     /// disagreement means an unmodelled discount or charge, so it must stay exact.
     /// Line arithmetic additionally allows a relative error, because a POS rounds
     /// the unit price it prints and a heavily rounded line still has to parse.
+    /// Both tests are on magnitudes: the sign a line carries says what the document
+    /// is, not whether its columns were read correctly.
     /// </summary>
     private bool WithinTolerance(decimal expected, decimal actual)
     {
         var limits = _config.Limits;
-        var error = Math.Abs(expected - actual);
-        return error <= limits.LineTolerance ||
-               (actual != 0 && error / Math.Max(actual, expected) <= limits.RelativeTolerance);
+        var error = Math.Abs(Math.Abs(expected) - Math.Abs(actual));
+        if (error <= limits.LineTolerance)
+        {
+            return true;
+        }
+
+        var scale = Math.Max(Math.Abs(expected), Math.Abs(actual));
+        return scale > 0 && error / scale <= limits.RelativeTolerance;
     }
 
     public ParseResult Parse(string text)
@@ -177,9 +240,14 @@ public sealed class ReceiptParser
                 warnings);
         }
 
-        if (total <= 0)
+        if (total == 0)
         {
-            return ParseResult.Review("The parsed item total is not positive.", warnings);
+            return ParseResult.Review("The parsed item total is zero; nothing would be fiscalised.", warnings);
+        }
+
+        if (MixedSignProblem(items) is { } mixed)
+        {
+            return ParseResult.Review(mixed, warnings);
         }
 
         var printedTotal = ExtractPrintedTotal(lines);
@@ -201,13 +269,11 @@ public sealed class ReceiptParser
 
         var currency = DetectCurrency(lines);
         var paymentMethod = DetectPaymentMethod(lines);
-        var (transactionType, relatedInvoice, reason) = DetectTransactionType(lines, invoiceNumber, warnings);
+        var (transactionType, relatedInvoice, reason) = DetectTransactionType(lines, invoiceNumber, total, start, warnings);
 
-        if (transactionType == "CreditNote" && string.IsNullOrEmpty(relatedInvoice))
+        if (MissingReferenceProblem(transactionType, relatedInvoice) is { } missingReference)
         {
-            return ParseResult.Review(
-                "Credit note has no original invoice number; refusing to fiscalise a correction without a reference.",
-                warnings);
+            return ParseResult.Review(missingReference, warnings);
         }
 
         var buyer = BuildBuyer(lines);
@@ -337,7 +403,7 @@ public sealed class ReceiptParser
 
         ReportTaxDecisions(taxDecisions, warnings);
 
-        return BuildParsedResult(lines, text, items, total, taxTotal, warnings);
+        return BuildParsedResult(lines, text, items, total, taxTotal, header, warnings);
     }
 
     private int FindInvoiceTableHeader(string[] lines)
@@ -387,13 +453,15 @@ public sealed class ReceiptParser
         error = "";
         bucket = new TaxBucket(_tax.DefaultTaxType, TaxFromDefault, null, null, null);
 
-        if (!TryParseMoney(match.Groups["qty"].Value, out var quantity) || quantity <= 0)
+        // Every comparison below is on magnitudes: the row's own sign says whether money is
+        // coming or going, and a returned row prints "-1.00M-100.00" for the same arithmetic.
+        if (!TryParseMoney(match.Groups["qty"].Value, out var quantity) || quantity == 0)
         {
             error = "Invoice row has an invalid quantity.";
             return false;
         }
 
-        if (!TryParseMoney(match.Groups["price"].Value, out var unitPrice) || unitPrice < 0 ||
+        if (!TryParseMoney(match.Groups["price"].Value, out var unitPrice) ||
             !TryParseMoney(match.Groups["disc"].Value, out var discountPercent) ||
             !TryParseMoney(match.Groups["vat"].Value, out var vatPercent) ||
             !TryParseMoney(match.Groups["exclusive"].Value, out var exclusiveTotal))
@@ -410,27 +478,29 @@ public sealed class ReceiptParser
             return false;
         }
 
+        var sign = Math.Sign(exclusiveTotal) == 0 ? 1 : Math.Sign(exclusiveTotal);
+        var exclusive = Math.Abs(exclusiveTotal);
         var discount = Math.Clamp(discountPercent / 100m, 0m, 1m);
         var vatRate = Math.Max(0m, vatPercent / 100m);
-        var expectedExclusive = Math.Round(quantity * unitPrice * (1m - discount), 2);
-        if (Math.Abs(expectedExclusive - exclusiveTotal) > LineTolerance)
+        var expectedExclusive = Math.Round(Math.Abs(quantity) * Math.Abs(unitPrice) * (1m - discount), 2);
+        if (Math.Abs(expectedExclusive - exclusive) > LineTolerance)
         {
-            error = $"Invoice row qty x price ({expectedExclusive:0.00}) does not match its exclusive total ({exclusiveTotal:0.00}).";
+            error = $"Invoice row qty x price ({expectedExclusive:0.00}) does not match its exclusive total ({exclusive:0.00}).";
             return false;
         }
 
-        var amount = hasInclusive ? inclusiveTotal : Math.Round(exclusiveTotal * (1m + vatRate), 2);
+        var inclusive = Math.Round(exclusive * (1m + vatRate), 2);
+        var amount = hasInclusive ? Math.Abs(inclusiveTotal) : inclusive;
         if (hasInclusive)
         {
-            var expectedInclusive = Math.Round(exclusiveTotal * (1m + vatRate), 2);
-            if (Math.Abs(expectedInclusive - amount) > LineTolerance)
+            if (Math.Abs(inclusive - amount) > LineTolerance)
             {
-                error = $"Invoice row exclusive total ({exclusiveTotal:0.00}) plus VAT ({vatPercent:0.##}%) does not match its inclusive total ({amount:0.00}).";
+                error = $"Invoice row exclusive total ({exclusive:0.00}) plus VAT ({vatPercent:0.##}%) does not match its inclusive total ({amount:0.00}).";
                 return false;
             }
         }
 
-        lineTax = Math.Round(amount - exclusiveTotal, 2);
+        lineTax = Math.Round(sign * (amount - exclusive), 2);
         var name = CombineInvoiceItemName(pendingName, match.Groups["name"].Value);
         if (name.Length == 0)
         {
@@ -449,7 +519,8 @@ public sealed class ReceiptParser
             ? (vatRate > 0 ? vatRate : (decimal)_config.VatRate)
             : 0m;
 
-        item = new ParsedItem(name, quantity, amount / quantity, Math.Round(amount, 2), bucket.TaxType, itemRate);
+        var signedAmount = sign * amount;
+        item = new ParsedItem(name, quantity, signedAmount / quantity, Math.Round(signedAmount, 2), bucket.TaxType, itemRate);
         return true;
     }
 
@@ -475,20 +546,30 @@ public sealed class ReceiptParser
         IReadOnlyList<ParsedItem> items,
         decimal total,
         decimal taxTotal,
+        int announcementEnd,
         List<string> warnings)
     {
+        if (total == 0)
+        {
+            return ParseResult.Review("The parsed invoice total is zero; nothing would be fiscalised.", warnings);
+        }
+
+        if (MixedSignProblem(items) is { } mixed)
+        {
+            return ParseResult.Review(mixed, warnings);
+        }
+
         var invoiceNumber = ExtractInvoiceNumber(lines);
         if (string.IsNullOrEmpty(invoiceNumber))
         {
             warnings.Add("Invoice number not found; duplicate protection falls back to the exact job hash.");
         }
 
-        var (transactionType, relatedInvoice, reason) = DetectTransactionType(lines, invoiceNumber, warnings);
-        if (transactionType == "CreditNote" && string.IsNullOrEmpty(relatedInvoice))
+        var (transactionType, relatedInvoice, reason) =
+            DetectTransactionType(lines, invoiceNumber, total, announcementEnd, warnings);
+        if (MissingReferenceProblem(transactionType, relatedInvoice) is { } missingReference)
         {
-            return ParseResult.Review(
-                "Credit note has no original invoice number; refusing to fiscalise a correction without a reference.",
-                warnings);
+            return ParseResult.Review(missingReference, warnings);
         }
 
         var receipt = new ParsedReceipt
@@ -575,18 +656,18 @@ public sealed class ReceiptParser
                     if (!TryParseMoney(tokens[indices.Value.Qty], out var quantity) ||
                         !TryParseMoney(tokens[indices.Value.Price], out var price) ||
                         !TryParseMoney(tokens[indices.Value.Amount], out var amount) ||
-                        quantity <= 0)
+                        quantity == 0)
                     {
                         continue;
                     }
 
                     attempts++;
-                    var expected = Math.Round(quantity * price, 2);
+                    var expected = Math.Round(Math.Abs(quantity) * Math.Abs(price), 2);
 
                     if (WithinTolerance(expected, amount))
                     {
                         valid++;
-                        totalError += Math.Abs(expected - amount);
+                        totalError += Math.Abs(Math.Abs(expected) - Math.Abs(amount));
                     }
                 }
 
@@ -808,13 +889,13 @@ public sealed class ReceiptParser
                 continue;
             }
 
-            if (quantity <= 0 || unitPrice < 0 || amount < 0)
+            if (quantity == 0)
             {
                 continue;
             }
 
             candidates++;
-            var expected = Math.Round(unitPrice * quantity, 2);
+            var expected = Math.Round(Math.Abs(unitPrice * quantity), 2);
             if (!WithinTolerance(expected, amount))
             {
                 continue;
@@ -875,7 +956,9 @@ public sealed class ReceiptParser
             return null;
         }
 
-        if (quantity <= 0 || amount < 0)
+        // A returned line prints its sign; only a zero quantity says the columns were
+        // read onto something that is not an item.
+        if (quantity == 0)
         {
             return null;
         }
@@ -921,7 +1004,8 @@ public sealed class ReceiptParser
         return (tokens.ToArray(), slot);
     }
 
-    private static string BuildItemName(string[] tokens, ColumnIndices indices)    {
+    private static string BuildItemName(string[] tokens, ColumnIndices indices)
+    {
         var parts = new List<string>(tokens.Length);
         for (var i = 0; i < tokens.Length; i++)
         {
@@ -955,10 +1039,16 @@ public sealed class ReceiptParser
 
     private string? ExtractInvoiceNumber(string[] lines)
     {
-        var value = ExtractValue(lines, new[] { _config.InvoiceNumber });
+        // A credit note prints the invoice it reverses under a label of its own. Reading that
+        // as this document's number would file the correction under the original's number, and
+        // the gateway keys corrections by invoice number, so it would answer 409 for a sale
+        // that is already fiscalised.
+        var ownLines = WithoutReferenceLines(lines);
+
+        var value = ExtractValue(ownLines, new[] { _config.InvoiceNumber });
         if (string.IsNullOrEmpty(value))
         {
-            foreach (var line in lines)
+            foreach (var line in ownLines)
             {
                 var match = _invoiceNumberPattern.Match(line);
                 if (match.Success)
@@ -971,7 +1061,7 @@ public sealed class ReceiptParser
 
         if (string.IsNullOrEmpty(value))
         {
-            value = ExtractValue(lines, _config.InvoiceNumberKeywords);
+            value = ExtractValue(ownLines, _config.InvoiceNumberKeywords);
         }
 
         if (string.IsNullOrEmpty(value))
@@ -981,6 +1071,19 @@ public sealed class ReceiptParser
 
         value = Regex.Replace(value, @"[^A-Za-z0-9\-/]", "").Trim('-', '/');
         return value.Length is 0 || value.Length > _config.Limits.MaxInvoiceNumberLength ? null : value;
+    }
+
+    private string[] WithoutReferenceLines(string[] lines)
+    {
+        var labels = _corrections.OriginalInvoiceLabels;
+        if (labels.Count == 0)
+        {
+            return lines;
+        }
+
+        return lines
+            .Where(line => !labels.Any(label => line.Contains(label, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
     }
 
     private string? ExtractBuyerName(string[] lines)
@@ -1244,25 +1347,38 @@ public sealed class ReceiptParser
         return value is "CASH" or "CARD" or "MOBILE" or "TRANSFER" ? value : "CASH";
     }
 
-    private static (string Type, string? RelatedInvoice, string? Reason) DetectTransactionType(
+    /// <summary>
+    /// Whether the document reverses a sale. Three signals, in order of how much the paper
+    /// actually states: a keyword in the header, a document number the POS numbers as a
+    /// correction, and finally a negative total. The type matters more than it looks: the
+    /// gateway signs a correction from it, so a return read as a sale files VAT on money that
+    /// went back to the customer.
+    /// </summary>
+    private (string Type, string? RelatedInvoice, string? Reason) DetectTransactionType(
         string[] lines,
         string? invoiceNumber,
+        decimal total,
+        int announcementEnd,
         List<string> warnings)
     {
-        var text = string.Join('\n', lines).ToUpperInvariant();
         var type = "FiscalInvoice";
 
-        if (text.Contains("CREDIT NOTE", StringComparison.Ordinal) ||
-            text.Contains("REFUND", StringComparison.Ordinal) ||
-            (invoiceNumber is not null &&
-             (invoiceNumber.StartsWith("CR", StringComparison.OrdinalIgnoreCase) ||
-              invoiceNumber.Contains("-CR", StringComparison.OrdinalIgnoreCase))))
+        if (AnnouncedIn(lines, announcementEnd, _creditNoteKeywords) || NumberedAsCorrection(invoiceNumber))
         {
             type = "CreditNote";
         }
-        else if (text.Contains("DEBIT NOTE", StringComparison.Ordinal))
+        else if (AnnouncedIn(lines, announcementEnd, _debitNoteKeywords))
         {
             type = "DebitNote";
+        }
+
+        if (type == "FiscalInvoice" && total < 0 && _corrections.NegativeTotalMeansCreditNote)
+        {
+            type = "CreditNote";
+            warnings.Add(
+                $"The printed total is negative ({total:0.00}) and nothing above the items names the document type; " +
+                "filed as a credit note. Add this POS's wording to parse.corrections.creditNoteKeywords if it " +
+                "announces returns differently.");
         }
 
         if (type == "FiscalInvoice")
@@ -1270,18 +1386,77 @@ public sealed class ReceiptParser
             return (type, null, null);
         }
 
-        var related = ExtractValue(lines, new[]
-        {
-            "Original Invoice", "Original Receipt", "Against Invoice", "Reversal of"
-        });
-        var reason = ExtractValue(lines, new[] { "Reason", "Credit Note Reason" });
+        var related = ExtractValue(lines, _corrections.OriginalInvoiceLabels);
+        var reason = ExtractValue(lines, _corrections.ReasonLabels);
 
         if (string.IsNullOrEmpty(related))
         {
             warnings.Add("Correction document has no original invoice reference.");
         }
 
+        if (string.IsNullOrEmpty(reason))
+        {
+            warnings.Add(
+                $"Correction document states no reason under {string.Join(", ", _corrections.ReasonLabels)}; " +
+                "the gateway requires one, so a generic reason is sent in its place.");
+        }
+
         return (type, related, reason);
+    }
+
+    private bool NumberedAsCorrection(string? invoiceNumber)
+    {
+        var value = (invoiceNumber ?? "").Trim().ToUpperInvariant();
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        return _corrections.CreditNoteNumberPrefixes.Any(prefix =>
+        {
+            var trimmed = prefix.Trim();
+            return trimmed.Length > 0 &&
+                   (value.StartsWith(trimmed, StringComparison.Ordinal) ||
+                    value.Contains("-" + trimmed, StringComparison.Ordinal));
+        });
+    }
+
+    /// <summary>
+    /// A correction can only be filed against the invoice it reverses: the gateway answers 400
+    /// without a reference, and ZIMRA has no other way to tie the two documents together. The
+    /// message names the labels to configure, because "no reference" is a profile gap.
+    /// </summary>
+    private static bool IsCorrection(string transactionType) =>
+        transactionType is "CreditNote" or "DebitNote";
+
+    private string? MissingReferenceProblem(string transactionType, string? relatedInvoice)
+    {
+        if (!IsCorrection(transactionType) || !string.IsNullOrEmpty(relatedInvoice))
+        {
+            return null;
+        }
+
+        return "Correction document has no original invoice number; refusing to fiscalise a correction " +
+               $"without a reference. Print it on the slip, or add the label this POS uses to " +
+               $"parse.corrections.originalInvoiceLabels (currently {string.Join(", ", _corrections.OriginalInvoiceLabels)}).";
+    }
+
+    /// <summary>
+    /// The gateway totals a document from positive prices, so a slip that mixes a sale line
+    /// with a negative one cannot be filed as either: the return would be added to the sale.
+    /// A correction has to be its own document.
+    /// </summary>
+    private static string? MixedSignProblem(IReadOnlyList<ParsedItem> items)
+    {
+        var negative = items.Count(item => item.Amount < 0);
+        if (negative == 0 || negative == items.Count)
+        {
+            return null;
+        }
+
+        return $"{negative} of {items.Count} lines print a negative amount and the rest are positive. " +
+               "A sale and a return cannot share one fiscal document: the POS has to print the " +
+               "returned items as their own credit note.";
     }
 
     private decimal? ExtractPrintedTotal(string[] lines)

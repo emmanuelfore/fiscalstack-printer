@@ -193,15 +193,48 @@ per release on a Windows machine:
 5. Parse profiles: `install.ps1` reports the profiles shipped in `{app}\profiles`,
    Settings lists **sage** and **zohobooks**, *Use this profile* writes their rules into
    `config.json`, and *Import…* / *Save current rules as…* round-trip a file — including
-   `parse.taxRules`, which must survive the trip unchanged. Applying one
-   needs an app/service restart before receipts are read with it.
+   `parse.taxRules` and `parse.corrections`, which must survive the trip unchanged. Applying
+   one needs an app/service restart before receipts are read with it.
 6. Tax markers: print a till receipt with one exempt line (a code after the amount, e.g.
    `5.00 EX`) and one ordinary line. The fiscal receipt prints the exempt line under the
    exemption tax ID and the other under the standard rate; the jobs window shows no warning
    for the marked line and the *no marker* note only if the POS prints codes on some lines
    and not others.
-7. Tray mode: the Run value starts the app at sign-in for the intended user.
-8. Uninstall leaves the service, printer and Run value gone; `-Purge` also removes
+7. Returns: print a refund slip from the POS. With its original invoice number printed on it,
+   it fiscalises as a credit note, prints a negative total on the fiscal receipt, and does not
+   touch the sale it reverses; without one it is held for review and the reason names
+   `parse.corrections.originalInvoiceLabels`. Then reprint the *same* sale a second time and
+   confirm the ledger logs `DUPLICATE PRINT SUPPRESSED` with `type=FiscalInvoice` instead of
+   sending a second request.
+8. Reconcile: with a **test** key, make a fiscalisation whose answer the till cannot read —
+   print while the network cable is pulled, or with `apiEndpoint` aimed at a port that accepts
+   and never answers. The job lands as `AmbiguousFailure` and its invoice number stays blocked.
+   Restore connectivity and choose *Reconcile unknown receipts now*: its balloon reports
+   adopted / re-sent / set aside / still unknown, the job window then shows the sale
+   `Fiscalised`, and exactly one receipt exists in FiscalStack for it. Repeat with
+   `reconcile.autoResend` `false` and confirm nothing is sent at all — only a receipt the
+   server already has gets settled.
+9. Day report: on a till that printed today, *Daily Z-shift summary…* lists its documents, and the
+   bucket totals agree with the tax rows on the printed receipts. Open a day with no sales: the
+   summary says nothing was issued instead of showing a zero day that reads like a nil return.
+   **Save summary…** writes `fiscal-day-<date>.txt`; **Export lines (CSV)…** opens in Excel with
+   one row per printed line, fiscal code and receipt number filled, and credit-note lines signed —
+   and a line typed as `=1+1` at the counter stays text. Then, on a service-only till, run
+   `PrintInterceptor.exe --day-report=<yyyy-MM-dd> --csv=D:\fiscal\lines.csv` and confirm the exit
+   code is 0 (`$LASTEXITCODE`) and stdout holds the report alone, so `>` can redirect it. Delete
+   `state\print-snapshots` and confirm the report still reads the day from `fiscalised\`.
+10. Capture a profile: on a till whose `profiles` folder holds only the shipped two, print from an
+    unknown POS layout (rename a fixture's labels first, e.g. `SLIP NO:` / `SOLD TO:` / a
+    `Item Qty Price Disc % VAT % Total` header) so the job lands in **Needs review**, then open
+    *Capture receipt layout from a job…*. The job is in the dropdown with its text, the left reading
+    shows *— not read —* where the right one shows the value and its line, and the rules listed are
+    only the additions — no `productEndLine` for a footer word that also names a column. **Save
+    profile** writes `<id>.json` and Settings lists it; **Save and use now** also writes the rules
+    into `config.json` with `parse.profile` set, and after a restart the same receipt fiscalises.
+    Paste a receipt with a tax code the rules do not name (e.g. `6.00 G`) and confirm it is reported
+    under *What a profile cannot decide* instead of becoming a rule.
+11. Tray mode: the Run value starts the app at sign-in for the intended user.
+12. Uninstall leaves the service, printer and Run value gone; `-Purge` also removes
    `%ProgramData%\FiscalStack\PrintInterceptor`.
 
 ## Notes and open items

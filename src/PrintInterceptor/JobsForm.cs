@@ -308,6 +308,8 @@ public sealed class JobsForm : Form
             $"Duplicates blocked... {entry.DuplicateAttemptCount}",
             $"Last duplicate... {(entry.LastDuplicateAttemptAt is { } duplicateAt ? duplicateAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")}",
             $"Duplicate job... {OrDash(entry.LastDuplicateAttemptHash)}",
+            $"Reconcile passes... {entry.ReconcileAttempts}",
+            $"Last reconcile... {(entry.LastReconcileAt is { } reconcileAt ? reconcileAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")}",
             $"Print error..... {OrDash(entry.PrintError)}",
             $"Reason.......... {OrDash(entry.Error)}",
             $"Source job...... {OrDash(entry.SourceFile)}",

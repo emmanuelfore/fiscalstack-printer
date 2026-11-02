@@ -39,6 +39,37 @@ public sealed class FiscalInvoiceArchive
 
     public string DirectoryPath => _root;
 
+    /// <summary>
+    /// Reads an archived invoice back from its job hash. The reprint snapshot is pruned with
+    /// retention; this folder is a fiscal record and is not, so it is where a day report finds a
+    /// receipt printed months ago. The file name ends in the shortened hash, which is unique
+    /// enough for one till's archive.
+    /// </summary>
+    public ReceiptPrintModel? LoadByHash(string hash)
+    {
+        try
+        {
+            var suffix = "-" + Short(hash) + ".json";
+            var path = Directory.Exists(_root)
+                ? Directory.EnumerateFiles(_root, "*" + suffix, SearchOption.AllDirectories)
+                    .OrderByDescending(File.GetLastWriteTimeUtc)
+                    .FirstOrDefault()
+                : null;
+
+            if (path is null)
+            {
+                return null;
+            }
+
+            return JsonSerializer.Deserialize<ReceiptPrintModel>(File.ReadAllText(path), JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Could not read the archived fiscal invoice for {Short(hash)}", ex);
+            return null;
+        }
+    }
+
     public bool Save(string hash, ReceiptPrintModel model)
     {
         try

@@ -36,6 +36,7 @@ public sealed class InterceptorConfig
     public ParseConfig Parse { get; set; } = new();
     public StorageConfig Storage { get; set; } = new();
     public OfflineConfig Offline { get; set; } = new();
+    public ReconcileConfig Reconcile { get; set; } = new();
 
     [JsonIgnore]
     public string ConfigPath { get; set; } = "";
@@ -211,6 +212,27 @@ public sealed class InterceptorConfig
             errors.Add("offline.enabled requires apiKey: the device, key, taxes and counters are provisioned from FiscalStack.");
         }
 
+        if (Reconcile.Enabled && Reconcile.IntervalMinutes is < 0 or > 1440)
+        {
+            errors.Add("reconcile.intervalMinutes must be 0 (startup and tray only) or between 1 and 1440.");
+        }
+
+        if (Reconcile.MaxAttempts is < 1 or > 10)
+        {
+            errors.Add("reconcile.maxAttempts must be between 1 and 10; a job that never reconciles is an operator's problem, not a retry loop.");
+        }
+
+        if (Reconcile.ScanPages is < 1 or > 50)
+        {
+            errors.Add("reconcile.scanPages must be between 1 and 50; each page is 100 invoices read from the server.");
+        }
+
+        if (Reconcile.Enabled && Reconcile.AutoResend && !Storage.RetainJobs)
+        {
+            errors.Add("reconcile.autoResend replays the stored request body, so storage.retainJobs must keep it. " +
+                       "Turn reconcile.autoResend off to only adopt the server's proof.");
+        }
+
         return errors;
     }
 
@@ -227,6 +249,7 @@ public sealed class InterceptorConfig
         Parse ??= new ParseConfig();
         Storage ??= new StorageConfig();
         Offline ??= new OfflineConfig();
+        Reconcile ??= new ReconcileConfig();
 
         Parse.Patterns ??= ParsePatterns.Defaults();
         Parse.Limits ??= ParseLimits.Defaults();
@@ -245,6 +268,13 @@ public sealed class InterceptorConfig
         Parse.ItemTableEndMarkers ??= ParseConfig.DefaultItemTableEndMarkers();
         Parse.TaxRules ??= ParseConfig.DefaultTaxRules();
         Parse.NormalizeTaxRules();
+        Parse.Corrections ??= new CorrectionVocabulary();
+        Parse.Corrections.CreditNoteKeywords ??= CorrectionVocabulary.DefaultCreditNoteKeywords();
+        Parse.Corrections.DebitNoteKeywords ??= CorrectionVocabulary.DefaultDebitNoteKeywords();
+        Parse.Corrections.CreditNoteNumberPrefixes ??= new List<string> { "CR", "CN" };
+        Parse.Corrections.OriginalInvoiceLabels ??= CorrectionVocabulary.DefaultOriginalInvoiceLabels();
+        Parse.Corrections.ReasonLabels ??= CorrectionVocabulary.DefaultReasonLabels();
+        Parse.NormalizeCorrections();
 
         if (string.IsNullOrWhiteSpace(Parse.Profile))
         {
@@ -372,6 +402,13 @@ public sealed class ParseConfig
     /// </summary>
     public List<TaxMarkerRule> TaxRules { get; set; } = DefaultTaxRules();
 
+    /// <summary>
+    /// How a printed document says it is a correction — a return, credit note or debit note —
+    /// instead of a sale. This is the difference between filing the VAT back and filing a
+    /// second sale, so the words are per-POS data rather than hardcoded guesses.
+    /// </summary>
+    public CorrectionVocabulary Corrections { get; set; } = new();
+
     /// <summary>Labels that introduce the document date, e.g. "Date", "Dated".</summary>
     public List<string> DateLabels { get; set; } = DefaultDateLabels();
 
@@ -483,6 +520,11 @@ public sealed class ParseConfig
             errors.Add(taxError);
         }
 
+        foreach (var correctionError in ValidateCorrections())
+        {
+            errors.Add(correctionError);
+        }
+
         if (!InterceptorConfig.IsProfileId(Profile))
         {
             errors.Add($"parse.profile '{Profile}' must be 1-40 letters, digits or dashes.");
@@ -560,12 +602,88 @@ public sealed class ParseConfig
         }
     }
 
+    private IEnumerable<string> ValidateCorrections()
+    {
+        // A keyword with no letters, or a blank one, would match prose or every line.
+        foreach (var (field, keywords) in new[]
+                 {
+                     ("parse.corrections.creditNoteKeywords", Corrections.CreditNoteKeywords),
+                     ("parse.corrections.debitNoteKeywords", Corrections.DebitNoteKeywords)
+                 })
+        {
+            foreach (var keyword in (keywords ?? new List<string>()).Where(entry => !string.IsNullOrWhiteSpace(entry) && !entry.Any(char.IsLetter)))
+            {
+                yield return $"{field} entry '{keyword}' has no letters; a document type is read from words, not figures.";
+            }
+        }
+
+        var both = (Corrections.CreditNoteKeywords ?? new List<string>())
+            .Select(entry => entry.Trim().ToUpperInvariant())
+            .Intersect((Corrections.DebitNoteKeywords ?? new List<string>())
+                .Select(entry => entry.Trim().ToUpperInvariant()))
+            .Where(entry => entry.Length > 0)
+            .ToList();
+
+        if (both.Count > 0)
+        {
+            yield return "parse.corrections lists " + string.Join(", ", both.Select(keyword => $"'{keyword}'")) +
+                " as both a credit and a debit note keyword; one document cannot be both.";
+        }
+
+        foreach (var (field, prefixes) in new[] { ("parse.corrections.creditNoteNumberPrefixes", Corrections.CreditNoteNumberPrefixes) })
+        {
+            foreach (var prefix in (prefixes ?? new List<string>()).Where(entry =>
+                         string.IsNullOrWhiteSpace(entry) || !entry.All(char.IsLetter) || entry.Trim().Length is < 2 or > 4))
+            {
+                yield return $"{field} entry '{prefix}' must be 2 to 4 letters; a shorter one would type ordinary invoice numbers.";
+            }
+        }
+
+        foreach (var (field, labels) in new[]
+                 {
+                     ("parse.corrections.originalInvoiceLabels", Corrections.OriginalInvoiceLabels),
+                     ("parse.corrections.reasonLabels", Corrections.ReasonLabels)
+                 })
+        {
+            foreach (var label in (labels ?? new List<string>()).Where(string.IsNullOrWhiteSpace))
+            {
+                yield return $"{field} contains an empty label, which would match every line of the document.";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keywords are compared against the document's own upper-cased text, so a profile may
+    /// write them in any case. Labels stay as typed: they are matched case-insensitively
+    /// against the printed line and are shown to the operator in warnings.
+    /// </summary>
+    public void NormalizeCorrections()
+    {
+        Corrections.CreditNoteKeywords = Uppered(Corrections.CreditNoteKeywords);
+        Corrections.DebitNoteKeywords = Uppered(Corrections.DebitNoteKeywords);
+        Corrections.CreditNoteNumberPrefixes = Uppered(Corrections.CreditNoteNumberPrefixes);
+        Corrections.OriginalInvoiceLabels = Cleaned(Corrections.OriginalInvoiceLabels);
+        Corrections.ReasonLabels = Cleaned(Corrections.ReasonLabels);
+    }
+
+    private static List<string> Uppered(List<string> entries) => (entries ?? new List<string>())
+        .Where(entry => !string.IsNullOrWhiteSpace(entry))
+        .Select(entry => entry.Trim().ToUpperInvariant())
+        .Distinct()
+        .ToList();
+
+    private static List<string> Cleaned(List<string> entries) => (entries ?? new List<string>())
+        .Where(entry => !string.IsNullOrWhiteSpace(entry))
+        .Select(entry => entry.Trim())
+        .Distinct()
+        .ToList();
+
     /// <summary>
     /// A complete snapshot of the layout rules, for "save the working configuration as a
-    /// profile". How a line <em>declares</em> its VAT status is part of the layout, so the
-    /// marker vocabulary travels with the profile. The numbers a receipt is fiscalised with
-    /// — vatRate, vatFlag, currencies, payment method and the legacy name-symbol knobs — are
-    /// deliberately left out: a profile must not be able to change them.
+    /// profile". How a line <em>declares</em> its VAT status, and how the document says it is
+    /// a return, are both part of the layout, so they travel with the profile. The numbers a
+    /// receipt is fiscalised with — vatRate, vatFlag, currencies, payment method and the legacy
+    /// name-symbol knobs — are deliberately left out: a profile must not be able to change them.
     /// </summary>
     public ParseProfileRules ExportRules() => new()
     {
@@ -599,6 +717,15 @@ public sealed class ParseConfig
                 Where = rule.Where.ToList()
             })
             .ToList(),
+        Corrections = new CorrectionVocabulary
+        {
+            CreditNoteKeywords = Corrections.CreditNoteKeywords.ToList(),
+            DebitNoteKeywords = Corrections.DebitNoteKeywords.ToList(),
+            CreditNoteNumberPrefixes = Corrections.CreditNoteNumberPrefixes.ToList(),
+            OriginalInvoiceLabels = Corrections.OriginalInvoiceLabels.ToList(),
+            ReasonLabels = Corrections.ReasonLabels.ToList(),
+            NegativeTotalMeansCreditNote = Corrections.NegativeTotalMeansCreditNote
+        },
         Patterns = new ParseProfilePatterns
         {
             InvoiceNumber = Patterns.InvoiceNumber,
@@ -706,7 +833,9 @@ public sealed class ParseConfig
         }
     };
 
-    public static List<string> DefaultDateLabels() => new() { "Date", "Dated" };    public static List<string> DefaultDateFormats() => new()
+    public static List<string> DefaultDateLabels() => new() { "Date", "Dated" };
+
+    public static List<string> DefaultDateFormats() => new()
     {
         "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy",
         "dd-MM-yyyy HH:mm:ss", "dd-MM-yyyy HH:mm", "dd-MM-yyyy",
@@ -772,14 +901,16 @@ public sealed class ParsePatterns
     /// Needs the name, qty, price, disc, vat and exclusive groups; inclusive is optional.
     /// So is <c>tax</c> — a row that ends in a tax-code letter puts it there, which is how
     /// a POS with an exempt column is read without guessing from a 0% figure.
+    /// Quantity and the money columns may carry a leading sign, because that is how a row
+    /// being returned prints.
     /// </summary>
     public string InvoiceRow { get; set; } =
-        @"^(?<name>.*?)\s*(?<qty>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:[A-Z]{1,3}\s*)?" +
-        @"(?<price>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s*" +
+        @"^(?<name>.*?)\s*(?<qty>[-+]?\d{1,3}(?:,\d{3})*(?:\.\d+)?|[-+]?\d+(?:\.\d+)?)\s*(?:[A-Z]{1,3}\s*)?" +
+        @"(?<price>[-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|[-+]?\d+(?:\.\d{1,2})?)\s*" +
         @"(?<disc>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s*%\s*" +
         @"(?<vat>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)\s*%\s*" +
-        @"(?:[A-Z]{1,3}\s*)?(?<exclusive>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)" +
-        @"(?:\s*(?:[A-Z]{1,3}\s*)?(?<inclusive>\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?))?" +
+        @"(?:[A-Z]{1,3}\s*)?(?<exclusive>[-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|[-+]?\d+(?:\.\d{1,2})?)" +
+        @"(?:\s*(?:[A-Z]{1,3}\s*)?(?<inclusive>[-+]?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|[-+]?\d+(?:\.\d{1,2})?))?" +
         @"(?:\s+(?<tax>[A-Z]{1,3}))?$";
 
     /// <summary>First line of a two-line item: "unit price x quantity". Needs price and qty.</summary>
@@ -883,6 +1014,61 @@ public sealed class TaxMarkerRule
 }
 
 /// <summary>
+/// The words that make a printed document a correction instead of a sale. They travel with a
+/// profile because every POS titles a return differently, and the answer decides whether the
+/// VAT on the sale is filed back or a second sale is filed on top of it.
+/// </summary>
+public sealed class CorrectionVocabulary
+{
+    /// <summary>
+    /// Whole-word phrases on a short header line that mean "this document reverses a sale".
+    /// Matched as words, so a "RETURNS POLICY" footer does not turn a sale into a credit note.
+    /// </summary>
+    public List<string> CreditNoteKeywords { get; set; } = DefaultCreditNoteKeywords();
+
+    /// <summary>Same, for the rarer document that increases what the customer owes.</summary>
+    public List<string> DebitNoteKeywords { get; set; } = DefaultDebitNoteKeywords();
+
+    /// <summary>
+    /// A document number starting with one of these is a correction: tills often issue "CN-0142"
+    /// for a credit note, and the gateway itself auto-numbers corrections that way.
+    /// </summary>
+    public List<string> CreditNoteNumberPrefixes { get; set; } = new() { "CR", "CN" };
+
+    /// <summary>Labels naming the invoice being corrected, which the gateway requires.</summary>
+    public List<string> OriginalInvoiceLabels { get; set; } = DefaultOriginalInvoiceLabels();
+
+    /// <summary>Labels naming why the correction is issued, which the gateway requires.</summary>
+    public List<string> ReasonLabels { get; set; } = DefaultReasonLabels();
+
+    /// <summary>
+    /// A negative total is the strongest correction signal a till can print: it is the money
+    /// going back. Switched off only for a POS that prints a negative "TOTAL" for something
+    /// else, because a document filed as a credit note has to reference a real invoice.
+    /// </summary>
+    public bool NegativeTotalMeansCreditNote { get; set; } = true;
+
+    public static List<string> DefaultCreditNoteKeywords() => new()
+    {
+        "CREDIT NOTE", "REFUND", "RETURN", "SALES RETURN", "MERCHANDISE RETURN",
+        "REVERSE SALE", "REVERSAL", "RETURNED GOODS"
+    };
+
+    public static List<string> DefaultDebitNoteKeywords() => new() { "DEBIT NOTE" };
+
+    public static List<string> DefaultOriginalInvoiceLabels() => new()
+    {
+        "Original Invoice", "Original Receipt", "Against Invoice", "Reversal of",
+        "Ref Invoice", "Reference Invoice", "Invoice Ref"
+    };
+
+    public static List<string> DefaultReasonLabels() => new()
+    {
+        "Reason", "Credit Note Reason", "Return Reason", "Reversal Reason"
+    };
+}
+
+/// <summary>
 /// Numeric guard rails. They decide how much disagreement still counts as "this line
 /// parsed", so they are the difference between accepting a rounded POS total and
 /// inventing one — the printed-total check itself is not configurable.
@@ -936,6 +1122,33 @@ public sealed class OfflineConfig
         new OfflineTaxConfig { TaxType = "ZERO_RATED", TaxId = 2, TaxCode = "B" },
         new OfflineTaxConfig { TaxType = "EXEMPT", TaxId = 1, TaxCode = "C" }
     };
+}
+
+/// <summary>
+/// Closing the loop on a fiscalisation whose outcome was never read: a timeout leaves a
+/// receipt that may or may not exist at ZIMRA, and only the server can say. Reconciliation
+/// asks the server, adopts its proof when the receipt is there, and re-sends the very body
+/// that timed out when it is not.
+/// </summary>
+public sealed class ReconcileConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Minutes between background passes. 0 leaves reconcile at startup and from the tray only.</summary>
+    public int IntervalMinutes { get; set; } = 15;
+
+    /// <summary>
+    /// Re-send a job the gateway has never heard of. Off means reconcile only adopts the
+    /// server's proof and never sends anything, which is what an operator who has already
+    /// keyed the sale into FiscalStack by hand wants.
+    /// </summary>
+    public bool AutoResend { get; set; } = true;
+
+    /// <summary>Give up after this many passes over the same job and leave it for the operator.</summary>
+    public int MaxAttempts { get; set; } = 3;
+
+    /// <summary>How many invoice pages the lookup reads, newest first. The list route takes no filters.</summary>
+    public int ScanPages { get; set; } = 10;
 }
 
 public sealed class OfflineTaxConfig

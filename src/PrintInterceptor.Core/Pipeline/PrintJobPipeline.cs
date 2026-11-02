@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PrintInterceptor.Core.Capture;
 using PrintInterceptor.Core.Configuration;
 using PrintInterceptor.Core.Decoding;
@@ -27,6 +28,7 @@ public sealed class PrintJobPipeline : IJobProcessor
     private readonly OfflineSyncEngine _offlineSync;
     private readonly ILog _log;
     private readonly object _printGate = new();
+    private readonly SemaphoreSlim _reconcileGate = new(1, 1);
 
     public PrintJobPipeline(
         InterceptorConfig config,
@@ -112,19 +114,22 @@ public sealed class PrintJobPipeline : IJobProcessor
             return;
         }
 
-        var duplicateByInvoice = _ledger.FindBlockingByInvoice(receipt.InvoiceNumber, receipt.BusinessDateKey);
+        var duplicateByInvoice = _ledger.FindBlockingByInvoice(
+            receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
         if (duplicateByInvoice is not null)
         {
             _ledger.RecordDuplicateAttempt(duplicateByInvoice.Hash, hash);
             return;
         }
 
-        if (!_ledger.Claim(hash, receipt.InvoiceNumber, receipt.BusinessDateKey, sourceFile, receipt.Total, receipt.Currency))
+        if (!_ledger.Claim(hash, receipt.InvoiceNumber, receipt.BusinessDateKey, sourceFile,
+                receipt.Total, receipt.Currency, receipt.TransactionType))
         {
             // Claim performs the same checks under the ledger lock. This path is
             // the race-safe backstop if another job claimed it after our checks.
             var blocking = _ledger.FindBlockingByHash(hash)
-                           ?? _ledger.FindBlockingByInvoice(receipt.InvoiceNumber, receipt.BusinessDateKey);
+                           ?? _ledger.FindBlockingByInvoice(
+                               receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
             if (blocking is not null)
             {
                 _ledger.RecordDuplicateAttempt(blocking.Hash, hash);
@@ -138,6 +143,12 @@ public sealed class PrintJobPipeline : IJobProcessor
         }
 
         var request = FiscalizeRequestFactory.Create(receipt, _config.Parse);
+
+        // Serialised once and kept: a reconciliation has to replay the body the gateway already
+        // saw, not a second interpretation of the same receipt text.
+        var requestJson = JsonSerializer.Serialize(request, FiscalStackClient.RequestJsonOptions);
+        _jobStore.SaveRequest(sourceFile, requestJson);
+
         _log.Info(
             $"Fiscalising {receipt.TransactionType} {receipt.InvoiceNumber ?? "(auto invoice)"} " +
             $"{receipt.Total:0.00} {receipt.Currency}, {receipt.Items.Count} item(s).");
@@ -187,7 +198,7 @@ public sealed class PrintJobPipeline : IJobProcessor
             }
         }
 
-        var outcome = await _client.FiscaliseAsync(request, cancellationToken);
+        var outcome = await _client.FiscaliseRawAsync(requestJson, cancellationToken);
 
         if (outcome.Status == FiscalizeOutcomeStatus.Success && outcome.Response is not null)
         {
@@ -224,6 +235,313 @@ public sealed class PrintJobPipeline : IJobProcessor
 
         // No receipt is printed for rejected/ambiguous outcomes: the customer
         // must never receive a slip that looks fiscal but is not.
+    }
+
+    /// <summary>How many jobs with an unknown outcome a single pass looks at.</summary>
+    private const int ReconcileBatchSize = 20;
+
+    /// <summary>
+    /// The gateway rounds its own tax buckets, so a cent or two between the till's total and the
+    /// server's is arithmetic, not a different sale. Further apart means the number belongs to
+    /// another document and adopting it would be a forgery.
+    /// </summary>
+    private const decimal ReconcileTotalTolerance = 0.05m;
+
+    /// <summary>
+    /// A job claimed less than this ago is still being fiscalised by the capture thread, so its
+    /// outcome is not unknown yet. Longer than a request, its retries and its printing can take.
+    /// </summary>
+    private static readonly TimeSpan StaleInFlightAfter = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Resolves the jobs whose fiscalisation outcome is unknown. A timeout or a 5xx means the
+    /// receipt may already exist in ZIMRA, where printing nothing is a missing sale and printing
+    /// again is a duplicate — so each one is looked up in the tenant's own invoice list instead.
+    /// Found: the server's proof is adopted and the fiscal copy is printed. Absent: the body that
+    /// timed out is replayed, which the gateway's unique-number check makes safe. Anything the
+    /// pass cannot settle is left exactly as blocked, for the next pass or for the operator.
+    /// </summary>
+    /// <param name="force">
+    /// The tray's manual pass: it runs even when reconcile.enabled is off and ignores the attempt
+    /// budget, because an operator asking for it is the reason the budget exists.
+    /// </param>
+    public async Task<ReconcileReport> ReconcileAsync(CancellationToken cancellationToken, bool force = false)
+    {
+        if (!await _reconcileGate.WaitAsync(0, cancellationToken))
+        {
+            return new ReconcileReport(0, 0, 0, 0, 0, "Another reconciliation pass is already running.");
+        }
+
+        try
+        {
+            return await RunReconciliationAsync(cancellationToken, force);
+        }
+        finally
+        {
+            _reconcileGate.Release();
+        }
+    }
+
+    private async Task<ReconcileReport> RunReconciliationAsync(CancellationToken cancellationToken, bool force)
+    {
+        var reconcile = _config.Reconcile;
+
+        if (!force && !reconcile.Enabled)
+        {
+            return new ReconcileReport(0, 0, 0, 0, 0, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.ApiKey))
+        {
+            return new ReconcileReport(0, 0, 0, 0, 0, "apiKey is not configured, so nothing can be reconciled.");
+        }
+
+        var maxAttempts = force ? int.MaxValue : reconcile.MaxAttempts;
+        var pending = _ledger.PendingReconcile(
+            ReconcileBatchSize, maxAttempts, DateTimeOffset.Now, StaleInFlightAfter);
+
+        if (pending.Count == 0)
+        {
+            return new ReconcileReport(0, 0, 0, 0, 0, null);
+        }
+
+        _log.Info($"Reconciling {pending.Count} job(s) whose fiscalisation outcome is unknown.");
+
+        var adopted = 0;
+        var resent = 0;
+        var setAside = 0;
+        var unknown = 0;
+
+        foreach (var entry in pending)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _ledger.RecordReconcileAttempt(entry.Hash);
+
+            if (string.IsNullOrWhiteSpace(entry.InvoiceNumber))
+            {
+                // Nothing to look for, and resending an auto-numbered receipt would create a
+                // second one with a different number the gateway cannot recognise as a duplicate.
+                unknown++;
+                _log.Error(
+                    $"Cannot reconcile [{Short(entry.Hash)}]: the receipt was sent without an invoice number, " +
+                    "so the server cannot be asked which receipt it became and replaying it could create a second " +
+                    "one. Check the FiscalStack dashboard, then reprint from the till if the sale is missing.");
+                continue;
+            }
+
+            var first = await TryAdoptAsync(entry, cancellationToken);
+
+            if (first == Adoption.Adopted)
+            {
+                adopted++;
+                continue;
+            }
+
+            if (first == Adoption.Mismatched)
+            {
+                setAside++;
+                continue;
+            }
+
+            if (first == Adoption.Failed)
+            {
+                // A list that could not be read says nothing about whether the receipt exists.
+                // Resending on that answer is how a duplicate is created.
+                unknown++;
+                continue;
+            }
+
+            if (!reconcile.AutoResend)
+            {
+                unknown++;
+                _log.Warn(
+                    $"Invoice {entry.InvoiceNumber} is not on the server and reconcile.autoResend is off, " +
+                    $"so [{Short(entry.Hash)}] was not re-sent.");
+                continue;
+            }
+
+            var body = _jobStore.LoadRequest(entry.SourceFile);
+            if (body is null)
+            {
+                setAside++;
+                var reason =
+                    "The receipt is not on the server and the request body was not retained, so it cannot be " +
+                    "re-sent. Turn storage.retainJobs on, or fiscalise the sale again from the till.";
+                _ledger.MarkFailure(entry.Hash, LedgerStatus.NeedsReview, reason);
+                _log.Error($"Reconciliation stopped [{Short(entry.Hash)}]: {reason}");
+                continue;
+            }
+
+            var outcome = await _client.FiscaliseRawAsync(body, cancellationToken);
+
+            if (outcome.Status == FiscalizeOutcomeStatus.Success && outcome.Response is not null)
+            {
+                _offline.RecordOnlineSuccess(outcome.Response);
+                _ledger.MarkFiscalised(entry.Hash, outcome.Response);
+                resent++;
+                _log.Info(
+                    $"Re-sent [{Short(entry.Hash)}] and ZIMRA answered: fiscalCode=" +
+                    $"{outcome.Response.FiscalCode ?? "-"} receiptNo=" +
+                    $"{outcome.Response.ReceiptNumber?.ToString() ?? "-"}.");
+                await PrintAdoptedAsync(entry, outcome.Response, cancellationToken);
+                continue;
+            }
+
+            if (outcome.HttpStatus == 409)
+            {
+                // The number exists, so the timed-out request did land — after the list was read.
+                // Asking again settles it; reporting a rejection would leave a fiscalised sale
+                // that the till never printed.
+                var second = await TryAdoptAsync(entry, cancellationToken);
+                switch (second)
+                {
+                    case Adoption.Adopted:
+                        adopted++;
+                        continue;
+                    case Adoption.Mismatched:
+                        setAside++;
+                        continue;
+                    default:
+                        unknown++;
+                        _log.Error(
+                            $"Re-sending [{Short(entry.Hash)}] was refused as a duplicate of " +
+                            $"{entry.InvoiceNumber}, but the receipt could not be read back. It stays blocked.");
+                        continue;
+                }
+            }
+
+            if (outcome.Status == FiscalizeOutcomeStatus.Rejected)
+            {
+                setAside++;
+                _ledger.MarkFailure(entry.Hash, LedgerStatus.Rejected, outcome.Error ?? "The gateway refused the replay.");
+                _log.Error(
+                    $"Re-sending [{Short(entry.Hash)}] was refused: {outcome.Error}. No receipt was printed.");
+                continue;
+            }
+
+            unknown++;
+            _ledger.MarkFailure(
+                entry.Hash, LedgerStatus.AmbiguousFailure, outcome.Error ?? "The outcome is still unknown.");
+            _log.Warn($"Re-sending [{Short(entry.Hash)}] did not get an answer either: {outcome.Error}.");
+        }
+
+        if (unknown > 0 && !force)
+        {
+            var remaining = _ledger
+                .PendingReconcile(ReconcileBatchSize, reconcile.MaxAttempts, DateTimeOffset.Now, StaleInFlightAfter)
+                .Count;
+            var exhausted = _ledger.Count(LedgerStatus.AmbiguousFailure) - remaining;
+            if (exhausted > 0)
+            {
+                _log.Warn(
+                    $"{exhausted} job(s) have used all {reconcile.MaxAttempts} reconciliation passes. They stay " +
+                    "blocked so the invoice number cannot be fiscalised twice; resolve them from the tray.");
+            }
+        }
+
+        _log.Info(
+            $"Reconciliation pass: {adopted} adopted, {resent} re-sent, {setAside} set aside, " +
+            $"{unknown} still unknown.");
+
+        return new ReconcileReport(pending.Count, adopted, resent, setAside, unknown, null);
+    }
+
+    private enum Adoption
+    {
+        NotFound,
+        Adopted,
+        Failed,
+        Mismatched
+    }
+
+    /// <summary>
+    /// Asks the server whether it already holds this invoice and, if it does, records its proof.
+    /// </summary>
+    private async Task<Adoption> TryAdoptAsync(LedgerEntry entry, CancellationToken cancellationToken)
+    {
+        var lookup = await _client.FindInvoiceAsync(
+            entry.InvoiceNumber!, _config.Reconcile.ScanPages, cancellationToken);
+
+        if (lookup.Status == InvoiceLookupStatus.Failed)
+        {
+            _log.Warn(
+                $"Could not read the invoice list for [{Short(entry.Hash)}]: {lookup.Error}. " +
+                "The job stays blocked rather than being re-sent on an answer that means nothing.");
+            return Adoption.Failed;
+        }
+
+        if (lookup.Status == InvoiceLookupStatus.Absent)
+        {
+            if (lookup.WindowExhausted)
+            {
+                _log.Warn(
+                    $"The invoice walk for [{Short(entry.Hash)}] stopped after {lookup.PagesRead} page(s) " +
+                    $"(reconcile.scanPages). A receipt older than that window is not found here.");
+            }
+
+            return Adoption.NotFound;
+        }
+
+        var invoice = lookup.Invoice!;
+
+        if (invoice.Total is { } serverTotal &&
+            Math.Abs(Math.Abs(serverTotal) - Math.Abs(entry.Total)) > ReconcileTotalTolerance)
+        {
+            var reason =
+                $"The server has an invoice {invoice.InvoiceNumber} but its total is " +
+                $"{serverTotal:0.00} {invoice.Currency ?? entry.Currency}, not {entry.Total:0.00} {entry.Currency}. " +
+                "That is somebody else's receipt, so it was not adopted. Check the dashboard before resending.";
+            _ledger.MarkFailure(entry.Hash, LedgerStatus.NeedsReview, reason);
+            _log.Error($"Reconciliation stopped [{Short(entry.Hash)}]: {reason}");
+            return Adoption.Mismatched;
+        }
+
+        _ledger.MarkFiscalisedFromServer(entry.Hash, invoice);
+        _log.Info(
+            $"Adopted the server's proof for [{Short(entry.Hash)}]: invoice={invoice.InvoiceNumber} " +
+            $"fiscalCode={invoice.FiscalCode ?? "-"} receiptNo={invoice.ReceiptGlobalNo?.ToString() ?? "-"} " +
+            $"day={invoice.FiscalDayNo?.ToString() ?? "-"} counter=" +
+            $"{invoice.ReceiptCounter?.ToString() ?? "-"} (the list read carries no verification code, " +
+            "so the copy prints without one).");
+
+        await PrintAdoptedAsync(entry, invoice.ToResponse(), cancellationToken);
+        return Adoption.Adopted;
+    }
+
+    /// <summary>
+    /// Prints the fiscal copy for a job reconciliation settled. The receipt text comes back from
+    /// the archive; without it the proof is still in the ledger, but there is nothing to rebuild
+    /// the customer's copy from.
+    /// </summary>
+    private async Task PrintAdoptedAsync(LedgerEntry entry, FiscalizeResponse response, CancellationToken cancellationToken)
+    {
+        var sourceFile = entry.SourceFile;
+        var text = _jobStore.LoadText(sourceFile);
+
+        if (text is null)
+        {
+            _log.Warn(
+                $"The receipt text for [{Short(entry.Hash)}] was not retained, so its fiscal copy cannot be rebuilt " +
+                "here. The proof is in the ledger and prints from the till on the next reprint.");
+            return;
+        }
+
+        var parse = _parser.Parse(text);
+        if (parse.Status != ParseStatus.Parsed || parse.Receipt is null)
+        {
+            _log.Warn(
+                $"The retained text for [{Short(entry.Hash)}] no longer parses " +
+                $"({parse.Reason ?? "no reason given"}), so its fiscal copy was not printed.");
+            return;
+        }
+
+        await PrintFiscalReceiptAsync(
+            entry.Hash,
+            parse.Receipt,
+            response,
+            ResolvePrintFormat(_jobStore.RetainedFormat(sourceFile)),
+            _jobStore.RetainedOriginalPath(sourceFile),
+            cancellationToken);
     }
 
     private async Task IssueOfflineReceiptAsync(
@@ -669,4 +987,22 @@ public sealed class PrintJobPipeline : IJobProcessor
     }
 
     private static string Short(string hash) => hash[..Math.Min(12, hash.Length)];
+}
+
+/// <summary>
+/// What one reconciliation pass did. <see cref="StillUnknown"/> is the number left blocked for the
+/// next pass, so a run that settled nothing is visible instead of silent.
+/// </summary>
+public sealed record ReconcileReport(
+    int Scanned,
+    int Adopted,
+    int Resent,
+    int SetAside,
+    int StillUnknown,
+    string? Error = null)
+{
+    public string Summary => Scanned == 0
+        ? Error ?? "Nothing to reconcile."
+        : $"{Adopted} adopted, {Resent} re-sent, {SetAside} set aside, {StillUnknown} still unknown" +
+          (Error is null ? "" : $" ({Error})");
 }

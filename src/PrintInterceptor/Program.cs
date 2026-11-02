@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -11,6 +13,7 @@ using PrintInterceptor.Core.Fiscalisation;
 using PrintInterceptor.Core.Offline;
 using PrintInterceptor.Core.Pipeline;
 using PrintInterceptor.Core.Printing;
+using PrintInterceptor.Core.Reporting;
 using PrintInterceptor.Core.State;
 using PrintInterceptor.Core.Storage;
 
@@ -27,6 +30,7 @@ public static class Program
         var explicitTray = args.Contains("--tray", StringComparer.OrdinalIgnoreCase);
         var explicitService = args.Contains("--service", StringComparer.OrdinalIgnoreCase);
         var configureOnly = args.Contains("--configure-only", StringComparer.OrdinalIgnoreCase);
+        var dayReportRequested = DayReportRequested(args);
         var asWindowsService = WindowsServiceHelpers.IsWindowsService();
         var initialSetup = args.Contains("--setup", StringComparer.OrdinalIgnoreCase);
         var configPath = ResolveConfigPath(args);
@@ -35,7 +39,7 @@ public static class Program
         // double-click on the exe or the post-install launch shows no terminal.
         var needsConsole =
             !asWindowsService &&
-            (registerKey || clearKey || explicitConsole || (explicitService && !configureOnly));
+            (registerKey || clearKey || explicitConsole || dayReportRequested || (explicitService && !configureOnly));
         if (needsConsole && OperatingSystem.IsWindows())
         {
             AttachParentConsoleOrAllocate();
@@ -49,6 +53,7 @@ public static class Program
             !explicitService &&
             !registerKey &&
             !clearKey &&
+            !dayReportRequested &&
             (explicitTray || !explicitConsole);
         var consoleMode =
             !asWindowsService &&
@@ -86,6 +91,14 @@ public static class Program
         if (clearKey)
         {
             return ClearKey(config, secrets, log);
+        }
+
+        if (dayReportRequested)
+        {
+            // Owns stdout, so the report can be redirected or piped: the
+            // diagnostic lines it writes go to the log file only.
+            using var reportLog = new FileLog(Path.Combine(config.ResolveDataDirectory(), "logs"), false);
+            return PrintDayReport(config, args, reportLog);
         }
 
         var resolution = ApiKeyResolver.Resolve(
@@ -165,6 +178,7 @@ public static class Program
             services.AddSingleton<FiscalStackClient>();
             services.AddSingleton<JobStore>();
             services.AddSingleton<PrintSnapshotStore>();
+            services.AddSingleton<FiscalDayReportService>();
             services.AddSingleton<IReceiptPrinter, WindowsGdiReceiptPrinter>();
             services.AddSingleton<PrintJobPipeline>();
             services.AddSingleton<IJobProcessor>(serviceProvider =>
@@ -174,6 +188,7 @@ public static class Program
             {
                 services.AddHostedService<PrintInterceptorHostedService>();
                 services.AddHostedService<OfflineSyncService>();
+                services.AddHostedService<ReconcileService>();
                 services.AddHostedService<CompanyProfileHostedService>();
             }
         });
@@ -425,6 +440,86 @@ public static class Program
                 buffer.Append(key.KeyChar);
             }
         }
+    }
+
+    private const string DayReportFlag = "--day-report";
+    private const string CsvFlag = "--csv";
+
+    private static bool DayReportRequested(string[] arguments) =>
+        arguments.Any(argument =>
+            argument.Equals(DayReportFlag, StringComparison.OrdinalIgnoreCase) ||
+            argument.StartsWith(DayReportFlag + "=", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Prints the fiscal day report for one business date and exits. A till running only as a
+    /// service has no tray to open the report window from, so this is how its operator closes a
+    /// day and hands the accountant a file:
+    /// PrintInterceptor.exe --day-report=2026-10-31 --csv=C:\fiscal\2026-10-31.csv
+    /// The report reads local state only and never sends anything, so it works with the network
+    /// down and needs no API key.
+    /// </summary>
+    private static int PrintDayReport(InterceptorConfig config, string[] arguments, ILog log)
+    {
+        var date = FiscalDayReportService.Today;
+        string? csvPath = null;
+
+        foreach (var argument in arguments)
+        {
+            if (argument.StartsWith(DayReportFlag + "=", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = argument[(DayReportFlag.Length + 1)..];
+                if (!DateOnly.TryParseExact(
+                        value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out date))
+                {
+                    Console.Error.WriteLine($"--day-report needs a date as yyyy-MM-dd, not \"{value}\".");
+                    return 2;
+                }
+            }
+            else if (argument.StartsWith(CsvFlag + "=", StringComparison.OrdinalIgnoreCase))
+            {
+                csvPath = argument[(CsvFlag.Length + 1)..];
+                if (csvPath.Length == 0)
+                {
+                    Console.Error.WriteLine("--csv needs a file path, as --csv=C:\\fiscal\\lines.csv");
+                    return 2;
+                }
+            }
+        }
+
+        var ledger = new JobLedger(Path.Combine(config.ResolveDataDirectory(), "state"), log);
+        var report = new FiscalDayReportService(
+            config,
+            ledger,
+            new PrintSnapshotStore(config, log),
+            log).Build(date);
+
+        Console.Out.Write(report.Render());
+
+        if (csvPath is null)
+        {
+            return 0;
+        }
+
+        if (report.Lines.Count == 0)
+        {
+            Console.Error.WriteLine($"{report.BusinessDate} has no fiscalised lines; no CSV was written.");
+            return 3;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(csvPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            File.WriteAllText(fullPath, report.Csv(), new UTF8Encoding(true));
+            Console.Error.WriteLine($"Wrote {report.Lines.Count} fiscalised line(s) to {fullPath}.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not write {csvPath}: {ex.Message}");
+            return 1;
+        }
+
+        return 0;
     }
 
     private static string ResolveConfigPath(string[] arguments)

@@ -74,6 +74,13 @@ public sealed class ParseProfileRules
     /// <summary>The whole marker list, in precedence order. Stating it replaces the built-in list.</summary>
     public List<TaxMarkerRule>? TaxRules { get; set; }
 
+    /// <summary>
+    /// The correction vocabulary. A profile that states only some of it keeps the built-in
+    /// defaults for the rest, so a POS that prints "Reversal Ref" for the original invoice
+    /// does not also have to restate every credit-note word.
+    /// </summary>
+    public CorrectionVocabulary? Corrections { get; set; }
+
     public ParseProfilePatterns? Patterns { get; set; }
     public ParseProfileLimits? Limits { get; set; }
 
@@ -121,7 +128,50 @@ public sealed class ParseProfileRules
 
         Patterns?.ApplyTo(config.Patterns);
         Limits?.ApplyTo(config.Limits);
+
+        if (Corrections is not null) config.Corrections = CopyVocabulary(Corrections);
     }
+
+    /// <summary>
+    /// Deep copy for applying, so a later edit of the live vocabulary cannot reach back into
+    /// the profile object it came from. A list the profile leaves out (or writes as null) keeps
+    /// its built-in default; an explicit empty list means "this POS never prints the word".
+    /// Keywords are upper-cased here because the parser compares them with the document's own
+    /// upper-cased text.
+    /// </summary>
+    private static CorrectionVocabulary CopyVocabulary(CorrectionVocabulary? source)
+    {
+        var copy = new CorrectionVocabulary
+        {
+            CreditNoteKeywords = KeywordList(source?.CreditNoteKeywords, CorrectionVocabulary.DefaultCreditNoteKeywords()),
+            DebitNoteKeywords = KeywordList(source?.DebitNoteKeywords, CorrectionVocabulary.DefaultDebitNoteKeywords()),
+            CreditNoteNumberPrefixes = KeywordList(source?.CreditNoteNumberPrefixes, new List<string> { "CR", "CN" }),
+            OriginalInvoiceLabels = CleanList(source?.OriginalInvoiceLabels, CorrectionVocabulary.DefaultOriginalInvoiceLabels()),
+            ReasonLabels = CleanList(source?.ReasonLabels, CorrectionVocabulary.DefaultReasonLabels()),
+            NegativeTotalMeansCreditNote = source?.NegativeTotalMeansCreditNote ?? true
+        };
+        return copy;
+    }
+
+    private static List<string> KeywordList(List<string>? entries, List<string> fallback) => entries switch
+    {
+        null => fallback.ToList(),
+        _ => entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry))
+            .Select(entry => entry.Trim().ToUpperInvariant())
+            .Distinct()
+            .ToList()
+    };
+
+    private static List<string> CleanList(List<string>? entries, List<string> fallback) => entries switch
+    {
+        null => fallback.ToList(),
+        _ => entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry))
+            .Select(entry => entry.Trim())
+            .Distinct()
+            .ToList()
+    };
 }
 
 /// <summary>Regex overrides. Names and groups are the contract checked by <see cref="ParsePatterns.Validate"/>.</summary>

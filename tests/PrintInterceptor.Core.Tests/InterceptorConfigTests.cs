@@ -169,4 +169,123 @@ public class InterceptorConfigTests
 
         Assert.Contains(errors, e => e.Contains("offline.enabled") && e.Contains("apiKey"));
     }
+
+    [Fact]
+    public void AWordThatMeansBothACreditAndADebitNoteIsRejected()
+    {
+        var config = new InterceptorConfig();
+        config.Parse.Corrections.CreditNoteKeywords = ["ADJUSTMENT"];
+        config.Parse.Corrections.DebitNoteKeywords = ["adjustment"];
+
+        var errors = config.Validate();
+
+        Assert.Contains(errors, e => e.Contains("both a credit and a debit note"));
+    }
+
+    [Fact]
+    public void ACorrectionKeywordMadeOnlyOfFiguresIsRejected()
+    {
+        var config = new InterceptorConfig();
+        config.Parse.Corrections.CreditNoteKeywords = ["-1234"];
+
+        Assert.Contains(config.Validate(), e => e.Contains("creditNoteKeywords") && e.Contains("no letters"));
+    }
+
+    [Fact]
+    public void ACorrectionNumberPrefixThatCouldMatchASaleIsRejected()
+    {
+        var config = new InterceptorConfig();
+        config.Parse.Corrections.CreditNoteNumberPrefixes = ["INV", "1", "ABCDEFGH"];
+
+        var errors = config.Validate();
+
+        Assert.Equal(2, errors.Count(e => e.Contains("creditNoteNumberPrefixes")));
+    }
+
+    [Fact]
+    public void ABlankCorrectionLabelWouldMatchEveryLineAndIsRejected()
+    {
+        var config = new InterceptorConfig();
+        config.Parse.Corrections.OriginalInvoiceLabels = [" "];
+        config.Parse.Corrections.ReasonLabels = [""];
+
+        var errors = config.Validate();
+
+        Assert.Contains(errors, e => e.Contains("originalInvoiceLabels") && e.Contains("empty label"));
+        Assert.Contains(errors, e => e.Contains("reasonLabels") && e.Contains("empty label"));
+    }
+
+    [Fact]
+    public void TheExampleConfigCarriesTheBuiltInCorrectionVocabulary()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "../../../../../config.example.json"));
+        var example = InterceptorConfig.LoadOrCreate(path).Parse.Corrections;
+        var builtIn = new ParseConfig().Corrections;
+
+        Assert.Equal(builtIn.CreditNoteKeywords, example.CreditNoteKeywords);
+        Assert.Equal(builtIn.DebitNoteKeywords, example.DebitNoteKeywords);
+        Assert.Equal(builtIn.CreditNoteNumberPrefixes, example.CreditNoteNumberPrefixes);
+        Assert.Equal(builtIn.OriginalInvoiceLabels, example.OriginalInvoiceLabels);
+        Assert.Equal(builtIn.ReasonLabels, example.ReasonLabels);
+        Assert.Equal(builtIn.NegativeTotalMeansCreditNote, example.NegativeTotalMeansCreditNote);
+    }
+
+    [Fact]
+    public void AReconcileIntervalOutsideADayIsRejectedButZeroMeansManualOnly()
+    {
+        var config = new InterceptorConfig { Reconcile = new ReconcileConfig { IntervalMinutes = 1441 } };
+        Assert.Contains(config.Validate(), e => e.Contains("reconcile.intervalMinutes"));
+
+        config.Reconcile.IntervalMinutes = 0;
+        Assert.DoesNotContain(config.Validate(), e => e.Contains("reconcile.intervalMinutes"));
+
+        config.Reconcile.Enabled = false;
+        config.Reconcile.IntervalMinutes = -5;
+        Assert.DoesNotContain(config.Validate(), e => e.Contains("reconcile.intervalMinutes"));
+    }
+
+    [Fact]
+    public void AnUnboundedReconcileRetryLoopIsRejected()
+    {
+        var config = new InterceptorConfig { Reconcile = new ReconcileConfig { MaxAttempts = 0 } };
+        Assert.Contains(config.Validate(), e => e.Contains("reconcile.maxAttempts"));
+
+        config.Reconcile.MaxAttempts = 11;
+        Assert.Contains(config.Validate(), e => e.Contains("reconcile.maxAttempts"));
+    }
+
+    [Fact]
+    public void AReconcileScanThatWouldReadTheWholeLedgerIsRejected()
+    {
+        var config = new InterceptorConfig { Reconcile = new ReconcileConfig { ScanPages = 51 } };
+
+        Assert.Contains(config.Validate(), e => e.Contains("reconcile.scanPages"));
+    }
+
+    [Fact]
+    public void ReSendingWithoutRetainingTheRequestBodyIsRejected()
+    {
+        var config = new InterceptorConfig { Storage = new StorageConfig { RetainJobs = false } };
+
+        Assert.Contains(config.Validate(), e => e.Contains("reconcile.autoResend") && e.Contains("storage.retainJobs"));
+
+        config.Reconcile.AutoResend = false;
+        Assert.DoesNotContain(config.Validate(), e => e.Contains("reconcile.autoResend"));
+    }
+
+    [Fact]
+    public void TheExampleConfigCarriesTheBuiltInReconcileSettings()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "../../../../../config.example.json"));
+        var example = InterceptorConfig.LoadOrCreate(path).Reconcile;
+        var builtIn = new ReconcileConfig();
+
+        Assert.Equal(builtIn.Enabled, example.Enabled);
+        Assert.Equal(builtIn.IntervalMinutes, example.IntervalMinutes);
+        Assert.Equal(builtIn.AutoResend, example.AutoResend);
+        Assert.Equal(builtIn.MaxAttempts, example.MaxAttempts);
+        Assert.Equal(builtIn.ScanPages, example.ScanPages);
+    }
 }

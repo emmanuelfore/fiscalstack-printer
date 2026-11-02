@@ -100,6 +100,74 @@ public sealed class JobStoreTests : IDisposable
         Assert.Null(store.SaveOriginalCopy("stamp-hash", "received"u8.ToArray(), JobFormat.Text));
     }
 
+    [Fact]
+    public void KeepsTheExactRequestBodyBesideTheReceiptItWasBuiltFrom()
+    {
+        const string body = """{"items":[{"name":"Bread Loaf","quantity":1,"unitPrice":2.5}],"invoiceNumber":"INV-1001"}""";
+        var store = CreateStore();
+        var sourceFile = store.Save(
+            "req-hash", new DecodedJob(true, JobFormat.Text, "Total: 2.50", null, null), "Total: 2.50"u8.ToArray());
+
+        var requestPath = store.SaveRequest(sourceFile, body);
+
+        Assert.NotNull(requestPath);
+        Assert.Equal(JobStore.RequestPath(sourceFile!), requestPath);
+        Assert.Equal(body, File.ReadAllText(requestPath!));
+
+        // A reconciliation reads the file back through the receipt it belongs to, not the path.
+        Assert.Equal(body, store.LoadRequest(sourceFile));
+
+        // A second store on the same folder proves the body is on disk, not in memory.
+        Assert.Equal(body, CreateStore().LoadRequest(sourceFile));
+    }
+
+    [Fact]
+    public void ThereIsNoRequestToReplayForAJobWhoseTextWasNeverArchived()
+    {
+        var store = CreateStore();
+
+        Assert.Null(store.SaveRequest(null, "{}"));
+        Assert.Null(store.LoadRequest(null));
+        Assert.Null(store.LoadText(null));
+    }
+
+    [Fact]
+    public void DisabledRetentionLeavesNothingToReplay()
+    {
+        var config = new InterceptorConfig
+        {
+            Storage = new StorageConfig { DataDirectory = _directory, RetainJobs = false }
+        };
+        var store = new JobStore(config, NullLog.Instance);
+
+        Assert.Null(store.SaveRequest(Path.Combine(_directory, "today", "hash.txt"), "{}"));
+    }
+
+    [Fact]
+    public void TheArchivedPdfIsFoundAgainFromItsReceiptText()
+    {
+        var store = CreateStore();
+        var raw = "%PDF-1.7\ninvoice"u8.ToArray();
+        var sourceFile = store.Save(
+            "pdf-hash", new DecodedJob(true, JobFormat.Pdf, "decoded invoice", null, null), raw);
+
+        Assert.NotNull(store.SaveOriginalCopy("pdf-hash", raw, JobFormat.Pdf));
+
+        Assert.Equal(JobFormat.Pdf, store.RetainedFormat(sourceFile));
+        Assert.EndsWith("original/pdf-hash.pdf", store.RetainedOriginalPath(sourceFile), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATextReceiptHasNoPostScriptOrPdfBehindIt()
+    {
+        var store = CreateStore();
+        var sourceFile = store.Save(
+            "txt-hash", new DecodedJob(true, JobFormat.Text, "Total: 5.00", null, null), "Total: 5.00"u8.ToArray());
+
+        Assert.Equal(JobFormat.Text, store.RetainedFormat(sourceFile));
+        Assert.Null(store.RetainedOriginalPath(sourceFile));
+    }
+
     private JobStore CreateStore() => new(
         new InterceptorConfig { Storage = new StorageConfig { DataDirectory = _directory } },
         NullLog.Instance);

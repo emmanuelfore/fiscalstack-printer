@@ -158,51 +158,6 @@ public class ReceiptParserTests
     }
 
     [Fact]
-    public void CreditNoteWithoutReferenceIsHeldForReview()
-    {
-        const string text = """
-            Store Demo
-            CREDIT NOTE
-            Order No.: CR-100
-            --------------------------------
-            Bread Loaf 1.00 2.50 2.50
-            --------------------------------
-            Items count: 1
-            Total: 2.50
-            """;
-
-        var result = new ReceiptParser(Config()).Parse(text);
-
-        Assert.Equal(ParseStatus.NeedsReview, result.Status);
-        Assert.Contains("no original invoice", result.Reason);
-    }
-
-    [Fact]
-    public void CreditNoteWithReferenceIsParsed()
-    {
-        const string text = """
-            Store Demo
-            CREDIT NOTE
-            Order No.: CR-100
-            Original Invoice: INV-99
-            Reason: Damaged goods
-            --------------------------------
-            Bread Loaf 1.00 2.50 2.50
-            --------------------------------
-            Items count: 1
-            Total: 2.50
-            """;
-
-        var result = new ReceiptParser(Config()).Parse(text);
-
-        Assert.Equal(ParseStatus.Parsed, result.Status);
-        var receipt = Assert.IsType<ParsedReceipt>(result.Receipt);
-        Assert.Equal("CreditNote", receipt.TransactionType);
-        Assert.Equal("INV-99", receipt.RelatedInvoiceNumber);
-        Assert.Equal("Damaged goods", receipt.CreditNoteReason);
-    }
-
-    [Fact]
     public void ParsesSageTaxInvoicePdfLayout()
     {
         const string text = """

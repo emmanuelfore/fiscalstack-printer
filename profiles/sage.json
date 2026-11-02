@@ -1,7 +1,7 @@
 {
   "name": "sage",
   "title": "Sage (built-in rule set)",
-  "description": "The layout PrintInterceptor shipped before profiles existed: thermal POS markers 'Order No.' and 'Items count', the Sage/Zoho Books collapsed invoice table, two-line fiscal register items, and loti amounts printed as M1 234.56. Every value below is also the built-in default, so a new profile only has to state the lines it changes. taxRules is the VAT vocabulary a line is read with: a code after the amount, a bracketed note, or a header over a block of items - never the product description, which is why 'Zero Sugar Coke' stays taxable.",
+  "description": "The layout PrintInterceptor shipped before profiles existed: thermal POS markers 'Order No.' and 'Items count', the Sage/Zoho Books collapsed invoice table, two-line fiscal register items, and loti amounts printed as M1 234.56. Every value below is also the built-in default, so a new profile only has to state the lines it changes. taxRules is the VAT vocabulary a line is read with: a code after the amount, a bracketed note, or a header over a block of items - never the product description, which is why 'Zero Sugar Coke' stays taxable. corrections is the wording that files a slip as a credit or debit note and the labels the original invoice number and the reason are read from; an amount printed with a minus sign is enough on its own, so a till that never says 'refund' is still understood.",
   "version": "1",
   "rules": {
     "productStartLine": "Order No.",
@@ -146,9 +146,44 @@
         ]
       }
     ],
+    "corrections": {
+      "creditNoteKeywords": [
+        "CREDIT NOTE",
+        "REFUND",
+        "RETURN",
+        "SALES RETURN",
+        "MERCHANDISE RETURN",
+        "REVERSE SALE",
+        "REVERSAL",
+        "RETURNED GOODS"
+      ],
+      "debitNoteKeywords": [
+        "DEBIT NOTE"
+      ],
+      "creditNoteNumberPrefixes": [
+        "CR",
+        "CN"
+      ],
+      "originalInvoiceLabels": [
+        "Original Invoice",
+        "Original Receipt",
+        "Against Invoice",
+        "Reversal of",
+        "Ref Invoice",
+        "Reference Invoice",
+        "Invoice Ref"
+      ],
+      "reasonLabels": [
+        "Reason",
+        "Credit Note Reason",
+        "Return Reason",
+        "Reversal Reason"
+      ],
+      "negativeTotalMeansCreditNote": true
+    },
     "patterns": {
       "invoiceNumber": "(?i)\\b(?:invoice\\s*(?:no|number)?|order\\s*no\\.?|number)\\s*[:#\\-]?\\s*(?<value>[A-Z]{2,5}[\\-/]?\\d{3,}|\\d{4,})",
-      "invoiceRow": "^(?<name>.*?)\\s*(?<qty>\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)\\s*(?:[A-Z]{1,3}\\s*)?(?<price>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*(?<disc>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?<vat>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?:[A-Z]{1,3}\\s*)?(?<exclusive>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)(?:\\s*(?:[A-Z]{1,3}\\s*)?(?<inclusive>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?))?(?:\\s+(?<tax>[A-Z]{1,3}))?$",
+      "invoiceRow": "^(?<name>.*?)\\s*(?<qty>[-+]?\\d{1,3}(?:,\\d{3})*(?:\\.\\d+)?|[-+]?\\d+(?:\\.\\d+)?)\\s*(?:[A-Z]{1,3}\\s*)?(?<price>[-+]?\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|[-+]?\\d+(?:\\.\\d{1,2})?)\\s*(?<disc>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?<vat>\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*%\\s*(?:[A-Z]{1,3}\\s*)?(?<exclusive>[-+]?\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|[-+]?\\d+(?:\\.\\d{1,2})?)(?:\\s*(?:[A-Z]{1,3}\\s*)?(?<inclusive>[-+]?\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?|[-+]?\\d+(?:\\.\\d{1,2})?))?(?:\\s+(?<tax>[A-Z]{1,3}))?$",
       "twoLineQuantity": "^(?<price>[\\d,]+(?:\\.\\d+)?)\\s*[xX]\\s*(?<qty>[\\d,]+(?:\\.\\d+)?)$",
       "twoLineNameAmount": "^(?<name>.+?)\\s*\\*?\\s*(?<amount>-?[\\d,]+\\.\\d{2})$",
       "currencyBeforeAmount": "(?<![A-Za-z])M\\s*\\d{1,3}(?:,\\d{3})*\\.\\d{2}(?![0-9])",

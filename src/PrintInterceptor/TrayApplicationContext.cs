@@ -11,6 +11,7 @@ using PrintInterceptor.Core.Diagnostics;
 using PrintInterceptor.Core.Fiscalisation;
 using PrintInterceptor.Core.Offline;
 using PrintInterceptor.Core.Pipeline;
+using PrintInterceptor.Core.Reporting;
 using PrintInterceptor.Core.State;
 using PrintInterceptor.Core.Storage;
 
@@ -35,7 +36,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly OfflineSyncEngine _sync;
     private readonly OfflineReceiptService _offline;
     private readonly JobLedger _ledger;
+    private readonly JobStore _jobs;
     private readonly PrintSnapshotStore _snapshots;
+    private readonly FiscalDayReportService _dayReports;
     private readonly PrintJobPipeline _pipeline;
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _timer;
@@ -79,7 +82,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _sync = services.GetRequiredService<OfflineSyncEngine>();
         _offline = services.GetRequiredService<OfflineReceiptService>();
         _ledger = services.GetRequiredService<JobLedger>();
+        _jobs = services.GetRequiredService<JobStore>();
         _snapshots = services.GetRequiredService<PrintSnapshotStore>();
+        _dayReports = services.GetRequiredService<FiscalDayReportService>();
         _pipeline = services.GetRequiredService<PrintJobPipeline>();
 
         _onlineIcon = CreateStatusIcon(Color.FromArgb(34, 197, 94));
@@ -115,8 +120,10 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Sync offline receipts now", null, SyncNow));
+        menu.Items.Add(new ToolStripMenuItem("Reconcile unknown receipts now", null, ReconcileNow));
         menu.Items.Add(new ToolStripMenuItem("Fiscal status…", null, (_, _) => ShowFiscalStatus()));
         menu.Items.Add(new ToolStripMenuItem("Fiscalisation jobs…", null, (_, _) => ShowJobs()));
+        menu.Items.Add(new ToolStripMenuItem("Daily Z-shift summary…", null, (_, _) => ShowDayReport()));
         menu.Items.Add(new ToolStripMenuItem("Test connection", null, TestConnection));
         menu.Items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings()));
         menu.Items.Add(new ToolStripSeparator());
@@ -126,6 +133,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Open logs folder", null, OpenLogs));
         menu.Items.Add(new ToolStripMenuItem("Open data folder", null, OpenData));
         menu.Items.Add(new ToolStripMenuItem("Import receipt parse profile…", null, ImportParseProfile));
+        menu.Items.Add(new ToolStripMenuItem("Capture receipt layout from a job…", null, (_, _) => ShowCapture()));
         menu.Items.Add(new ToolStripMenuItem("Open parse profiles folder", null, OpenParseProfiles));
         menu.Items.Add(new ToolStripSeparator());
 
@@ -526,6 +534,44 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// Settles receipts the till could not confirm — a timeout or a server error leaves the sale
+    /// neither printed nor refused. This pass ignores reconcile.enabled and the attempt budget:
+    /// an operator pressing it is the reason the manual path exists.
+    /// </summary>
+    private async void ReconcileNow(object? sender, EventArgs e)
+    {
+        try
+        {
+            var report = await _pipeline.ReconcileAsync(_cts.Token, force: true);
+
+            if (report.Scanned == 0)
+            {
+                Balloon(
+                    "Nothing to reconcile",
+                    report.Error ?? "No receipt is waiting for an answer from FiscalStack.",
+                    ToolTipIcon.Info);
+            }
+            else
+            {
+                Balloon(
+                    "Reconciliation finished",
+                    report.Summary,
+                    report.StillUnknown > 0 ? ToolTipIcon.Warning : ToolTipIcon.Info);
+            }
+
+            await RefreshAsync();
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Manual reconciliation failed", ex);
+            Balloon("Reconciliation failed", ex.Message, ToolTipIcon.Error);
+        }
+    }
+
     private void ResumeSync(object? sender, EventArgs e)
     {
         var reason = _sync.PauseReason ?? "The queue is paused.";
@@ -700,6 +746,32 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         using var form = new JobsForm(_ledger, _snapshots, _pipeline, _log);
         form.ShowDialog();
+    }
+
+    /// <summary>
+    /// The day's fiscal position and the accountant's line export, read from what this till keeps.
+    /// </summary>
+    private void ShowDayReport()
+    {
+        using var form = new DayReportForm(_dayReports, _config.ResolveDataDirectory());
+        form.ShowDialog();
+    }
+
+    /// <summary>
+    /// Onboarding for a POS no profile describes: one of the day's caught jobs becomes the layout
+    /// rules, shown as evidence before anything is written. Applying it changes how every later job
+    /// is read, so the cached status probe is dropped the same way Settings does.
+    /// </summary>
+    private void ShowCapture()
+    {
+        using var form = new ProfileCaptureForm(_ledger, _jobs, _config, Profiles, _log);
+        if (form.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        _deviceStatusAt = DateTimeOffset.MinValue;
+        _ = RefreshAsync(forceDevice: false);
     }
 
     private void ShowSettings()

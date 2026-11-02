@@ -103,7 +103,33 @@
         "markers": ["VAT", "STANDARD", "STD", "A"],
         "where": ["slot", "annotation"]
       }
-    ]
+    ],
+    "//corrections": "Which slips are returns and corrections rather than sales. creditNoteKeywords and debitNoteKeywords are matched as whole words, case-insensitively, only in the part of the document printed above the items - a 'NO RETURNS AFTER 7 DAYS' footer stays a footer. An empty list means this POS never prints the word and the type comes from the number prefix or the sign alone; omitting the key keeps these defaults. creditNoteNumberPrefixes types a document whose own number starts with them. originalInvoiceLabels and reasonLabels name the lines the original invoice and the reason are read from: the gateway rejects a correction with no reference, so a correction whose original is not printed on the slip is held, never guessed. negativeTotalMeansCreditNote files a slip whose total prints negative as a credit note and warns that the wording is missing.",
+    "corrections": {
+      "creditNoteKeywords": [
+        "CREDIT NOTE",
+        "REFUND",
+        "RETURN",
+        "SALES RETURN",
+        "MERCHANDISE RETURN",
+        "REVERSE SALE",
+        "REVERSAL",
+        "RETURNED GOODS"
+      ],
+      "debitNoteKeywords": ["DEBIT NOTE"],
+      "creditNoteNumberPrefixes": ["CR", "CN"],
+      "originalInvoiceLabels": [
+        "Original Invoice",
+        "Original Receipt",
+        "Against Invoice",
+        "Reversal of",
+        "Ref Invoice",
+        "Reference Invoice",
+        "Invoice Ref"
+      ],
+      "reasonLabels": ["Reason", "Credit Note Reason", "Return Reason", "Reversal Reason"],
+      "negativeTotalMeansCreditNote": true
+    }
   },
 
   "storage": {
@@ -114,5 +140,14 @@
 
   "offline": {
     "enabled": false
+  },
+
+  "//reconcile": "A fiscalisation whose response could not be read (a timeout, a 5xx) leaves a receipt that may or may not exist at ZIMRA. Reconciliation asks the server, adopts its proof when the receipt is there — and prints the fiscal copy the customer never got — and re-sends exactly the body that timed out when it is not. The lookup reads GET /invoices newest-first, so scanPages bounds how far back it looks. autoResend replays the request retained in the jobs folder, so storage.retainJobs must stay on; with it off, reconcile only ever adopts a proof and never sends. A job left ambiguous after maxAttempts passes is reported in the tray for the operator, because a receipt that exists twice is a fiscal problem nobody can undo.",
+  "reconcile": {
+    "enabled": true,
+    "intervalMinutes": 15,
+    "autoResend": true,
+    "maxAttempts": 3,
+    "scanPages": 10
   }
 }
