@@ -20,6 +20,16 @@ public sealed class InterceptorConfig
     public string ApiKey { get; set; } = "";
     public int ApiTimeoutSeconds { get; set; } = 30;
 
+    /// <summary>
+    /// Online fiscalisation is a network call in front of every print, so on a till
+    /// that idles between customers the pooled HTTPS session lapses and the next
+    /// receipt pays a fresh DNS + TLS handshake - seen as a pause after Print before
+    /// anything starts. The connection is pinged over this many seconds to keep it
+    /// warm for the next sale. 0 disables warming. Keep it under ~60 seconds so the
+    /// ping refreshes the pooled connection before .NET itself drops it as idle.
+    /// </summary>
+    public int ApiKeepWarmSeconds { get; set; } = 45;
+
     /// <summary>Full path to gswin64c.exe / gs. Empty = search PATH and standard install folders.</summary>
     public string GhostscriptPath { get; set; } = "";
     public int GhostscriptTimeoutSeconds { get; set; } = 30;
@@ -160,6 +170,11 @@ public sealed class InterceptorConfig
             (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
             errors.Add($"apiEndpoint '{ApiEndpoint}' must be an absolute http(s) URL.");
+        }
+
+        if (ApiKeepWarmSeconds is < 0 or > 55)
+        {
+            errors.Add("apiKeepWarmSeconds must be 0 (off) or between 1 and 55.");
         }
 
         if (ReadIdleTimeoutSeconds is < 1 or > 120)

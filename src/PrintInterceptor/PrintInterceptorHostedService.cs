@@ -14,6 +14,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
     private readonly PrintSnapshotStore _snapshots;
     private readonly OfflineReceiptService _offline;
     private readonly OfflineQueue _offlineQueue;
+    private readonly FiscalStackClient _client;
     private readonly ILog _log;
 
     public PrintInterceptorHostedService(
@@ -22,6 +23,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
         PrintSnapshotStore snapshots,
         OfflineReceiptService offline,
         OfflineQueue offlineQueue,
+        FiscalStackClient client,
         ILog log)
     {
         _server = server;
@@ -29,6 +31,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
         _snapshots = snapshots;
         _offline = offline;
         _offlineQueue = offlineQueue;
+        _client = client;
         _log = log;
     }
 
@@ -55,6 +58,11 @@ public sealed class PrintInterceptorHostedService : IHostedService
         }
 
         await _server.StartAsync(cancellationToken);
+
+        // Keep the online fiscalise connection warm so the first receipt after the
+        // till idles does not pay a cold TLS handshake before anything prints.
+        _client.StartKeepWarm();
+
         _log.Info("PrintInterceptor is ready.");
     }
 

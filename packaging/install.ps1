@@ -76,7 +76,10 @@ function Set-RestrictedAcl([string]$path, [string]$user) {
         "*S-1-5-18:(OI)(CI)F"        # SYSTEM
     )
     if (-not [string]::IsNullOrWhiteSpace($user)) {
-        $grants += "$user:(OI)(CI)F"
+        # ${} because "$user:(OI)..." would parse as a drive-qualified variable
+        # reference and a parse error here stops the whole script from running - it
+        # did, silently, from inside the setup .exe.
+        $grants += "${user}:(OI)(CI)F"
     }
 
     & icacls.exe $path /inheritance:r /grant:r @grants /T | Out-Null
@@ -146,6 +149,36 @@ function Remove-Autostart {
     }
 }
 
+# What the setup .exe reports to the operator. The wizard runs this script hidden,
+# so without a status file a till left without a printer, or without a service, still
+# finishes with a green progress bar and nothing to show for it.
+$printerState = "skipped"
+$installFailures = New-Object System.Collections.Generic.List[string]
+$statusFile = Join-Path $defaultRoot "install-status.txt"
+
+function Write-InstallStatus([string]$state) {
+    try {
+        if (-not (Test-Path $defaultRoot)) {
+            New-Item -ItemType Directory -Path $defaultRoot -Force | Out-Null
+        }
+        $lines = @(
+            "state=$state",
+            "printer=$printerState",
+            "port=$Port",
+            "runMode=$RunMode",
+            "time=$((Get-Date).ToString('o'))"
+        )
+        foreach ($failure in $installFailures) {
+            $lines += "failure=$failure"
+        }
+        Set-Content -Path $statusFile -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
+    }
+    catch {
+        # Nothing left to do about a status file that will not write; the install
+        # result is already on the console for anyone watching.
+    }
+}
+
 if ($Uninstall) {
     if (-not (Test-Elevated)) {
         throw "Uninstall requires an elevated PowerShell prompt."
@@ -180,6 +213,16 @@ if ($Uninstall) {
 }
 
 # ─── Install ──────────────────────────────────────────────────────────────────
+
+trap {
+    # A terminating error anywhere below leaves the till half-configured, so record
+    # how far it got before the exit code reaches the wizard.
+    $installFailures.Add($_.Exception.Message)
+    $printerState = if ($printerState -eq "skipped") { "not-reached" } else { $printerState }
+    Write-InstallStatus "failed"
+    Write-Error "PrintInterceptor installation failed: $($_.Exception.Message)"
+    exit 1
+}
 
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path (Split-Path $PSScriptRoot -Parent) "publish\PrintInterceptor.exe"
@@ -273,13 +316,31 @@ Set-RestrictedAcl (Split-Path $ConfigPath -Parent) $aclUser
 Set-RestrictedAcl $dataDirectory $aclUser
 Write-Host "Restricted ACLs on the configuration and data folders."
 
-# 2. Virtual printer.
+# 2. Virtual printer. This is the step the till cannot capture without, so it is
+#    verified rather than assumed, and it never takes the rest of the install down
+#    with it: a printer-less till still needs its service or its tray autostart.
 if ($SkipPrinter) {
     Write-Host "Skipping the virtual printer."
+    $printerState = "skipped"
 }
 else {
     $addPrinter = Resolve-SiblingScript "addprinter.ps1"
-    & $addPrinter -PrinterName $PrinterName -HostAddress $HostAddress -Port $Port -Mode $PrinterMode
+    try {
+        & $addPrinter -PrinterName $PrinterName -HostAddress $HostAddress -Port $Port -Mode $PrinterMode
+        if (Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue) {
+            $printerState = "installed"
+        }
+        else {
+            throw "the printer is not in the Windows printer list afterwards."
+        }
+    }
+    catch {
+        $printerState = "failed"
+        $repair = "& `"$addPrinter`" -PrinterName `"$PrinterName`" -HostAddress $HostAddress -Port $Port -Mode $PrinterMode"
+        $installFailures.Add("Virtual printer '$PrinterName': $($_.Exception.Message)")
+        Write-Warning "Virtual printer '$PrinterName' was not installed: $($_.Exception.Message)"
+        Write-Warning "No print job will reach PrintInterceptor until this is fixed. Repair from an elevated prompt: $repair"
+    }
 }
 
 if ($PrinterMode -eq "PostScript") {
@@ -357,8 +418,19 @@ else {
 
 Write-Host ""
 Write-Host "PrintInterceptor is installed."
-Write-Host "  Virtual printer : $(if ($SkipPrinter) { 'skipped' } else { $PrinterName })"
+Write-Host "  Virtual printer : $($printerState)$(if ($printerState -eq 'failed') { " - $PrinterName" })"
 Write-Host "  Listen port     : $Port"
 Write-Host "  Configuration   : $ConfigPath"
 Write-Host "  Data and logs   : $dataDirectory"
 Write-Host "Open the tray menu and choose 'Fiscal status…' to verify the device and fiscal day."
+
+if ($installFailures.Count -gt 0) {
+    Write-InstallStatus "partial"
+    Write-Host ""
+    Write-Error ("The install finished with problems:" + [Environment]::NewLine +
+        ($installFailures -join [Environment]::NewLine))
+    exit 1
+}
+
+Write-InstallStatus "ok"
+exit 0

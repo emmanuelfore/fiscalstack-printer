@@ -107,19 +107,72 @@ public sealed class PrintJobPipeline : IJobProcessor
             return;
         }
 
-        var duplicateByHash = _ledger.FindBlockingByHash(hash);
-        if (duplicateByHash is not null)
+        // One document, one record. A till that sends the same slip twice - a customer copy and a
+        // file copy, an operator pressing Print again because nothing happened yet, a POS that
+        // re-renders its own invoice - is not making a second sale, and it must not pay a second
+        // trip to the gateway for one either.
+        var alreadyIssued = _ledger.FindBlockingByHash(hash)
+                            ?? _ledger.FindBlockingByInvoice(
+                                receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
+        if (alreadyIssued is not null)
         {
-            _ledger.RecordDuplicateAttempt(duplicateByHash.Hash, hash);
+            // The proof is already on file, so the copy is printed from it. This is also the fast
+            // answer: no request, and nothing waiting on ZIMRA to issue a number that exists.
+            if (alreadyIssued.Status is LedgerStatus.Fiscalised or LedgerStatus.FiscalisedOffline)
+            {
+                var reprinted = TryReprint(alreadyIssued.Hash, out var reprintError);
+                _ledger.RecordDuplicateAttempt(
+                    alreadyIssued.Hash, hash, reprinted ? DuplicateOutcome.Reprinted : DuplicateOutcome.Suppressed);
+                if (!reprinted)
+                {
+                    _log.Error(
+                        $"The duplicate of {alreadyIssued.InvoiceNumber ?? Short(alreadyIssued.Hash)} could not be " +
+                        $"reprinted: {reprintError}");
+                }
+
+                return;
+            }
+
+            // In flight, or an outcome the gateway has not confirmed either way: nothing is printed
+            // and nothing is sent. A receipt that may already exist in ZIMRA is settled by
+            // reconciliation, not by a second press of Print.
+            _ledger.RecordDuplicateAttempt(alreadyIssued.Hash, hash);
             return;
         }
 
-        var duplicateByInvoice = _ledger.FindBlockingByInvoice(
-            receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
-        if (duplicateByInvoice is not null)
+        // Nothing blocking exists, but a rejected or held record for this same invoice may: the
+        // bytes of a re-printed slip rarely hash alike, so identity is the number the accountant
+        // uses. The retry is written onto that one record instead of opening a second document
+        // that the day report would count as another sale.
+        var retried = _ledger.FindByHash(hash)
+                      ?? _ledger.FindByInvoice(
+                          receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
+
+        // The record this job belongs to, so a document held for review is not entered twice
+        // either. Decided before the retry is announced, because a held document never goes to
+        // the gateway and must not be logged as though it did.
+        var record = retried?.Hash ?? hash;
+
+        // The gateway fiscalises the day that is open, so a slip carrying an older date cannot
+        // become a receipt for the day it is sent: it comes back as a validation error that looks
+        // like a broken till. Holding it here names the real problem, costs no request, and never
+        // quietly turns a sale printed on 22 October into a receipt dated today.
+        if (receipt.Date is { } printedOn && printedOn.Date != DateTimeOffset.Now.Date)
         {
-            _ledger.RecordDuplicateAttempt(duplicateByInvoice.Hash, hash);
+            var stale =
+                $"The document is dated {printedOn:dd/MM/yyyy} but the fiscal day open today is " +
+                $"{DateTimeOffset.Now:dd/MM/yyyy}, so it was held rather than sent. ZIMRA only accepts the " +
+                "currently-open day: print it on the day of sale, or fix the date the POS writes on the slip.";
+            _log.Warn($"Held for review [{Short(record)}]: {stale}");
+            _ledger.RecordNeedsReview(
+                record, receipt.InvoiceNumber, receipt.BusinessDateKey, stale, sourceFile);
             return;
+        }
+
+        if (retried is not null)
+        {
+            _ledger.RecordDuplicateAttempt(retried.Hash, hash, DuplicateOutcome.Retrying);
+            hash = retried.Hash;
         }
 
         if (!_ledger.Claim(hash, receipt.InvoiceNumber, receipt.BusinessDateKey, sourceFile,

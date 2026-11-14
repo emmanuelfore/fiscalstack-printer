@@ -53,6 +53,17 @@ public sealed class FiscalStackClient : IDisposable
     private bool _probeResult;
 
     /// <summary>
+    /// Keeps the fiscalise connection warm so a till that idles between customers
+    /// does not pay a cold DNS + TLS handshake on the first receipt of each burst.
+    /// </summary>
+    private Timer? _keepWarmTimer;
+    private int _keepWarmInFlight;
+    private int _keepWarmFailures;
+
+    /// <summary>Consecutive ping failures after which warming pauses until a real sale reconnects.</summary>
+    private const int KeepWarmFailureBackoff = 3;
+
+    /// <summary>
     /// The tenant key is sent per request and the endpoint resolved per request,
     /// so a key or endpoint written into the shared <see cref="InterceptorConfig"/>
     /// applies to the next receipt instead of needing a process restart. Only the
@@ -66,7 +77,10 @@ public sealed class FiscalStackClient : IDisposable
         {
             _config = config;
             // A DelegatingHandler passed to HttpClient must bring its own terminal
-            // handler; HttpClient does not assign one implicitly.
+            // handler; HttpClient does not assign one implicitly. The stock handler
+            // keeps an idle pooled connection for about a minute, which is longer
+            // than the keep-warm interval the host pings at, so the session survives
+            // between sales without us overriding proxy or pooling defaults.
             InnerHandler = new HttpClientHandler();
         }
 
@@ -110,6 +124,60 @@ public sealed class FiscalStackClient : IDisposable
         _actionHttp.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
         _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+    }
+
+    /// <summary>
+    /// Starts pinging the API root over the sale client so the pooled TCP + TLS
+    /// connection stays established and a receipt's own call reuses it instead of
+    /// handshaking. Called from the host once the service is running, not from the
+    /// constructor, so unit tests that point the client at a stub do not get an
+    /// idle background request. A no-op when warming is disabled (0) or already on.
+    /// </summary>
+    public void StartKeepWarm()
+    {
+        if (_config.ApiKeepWarmSeconds <= 0 || _keepWarmTimer is not null)
+        {
+            return;
+        }
+
+        _keepWarmTimer = new Timer(
+            _ => _ = KeepWarmAsync(),
+            null,
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(_config.ApiKeepWarmSeconds));
+    }
+
+    /// <summary>
+    /// Best-effort keep-warm ping. A response of any status (even 405 or 401) proves
+    /// the session is live; the request carries no payload and its result is discarded.
+    /// Warming pauses after a few consecutive failures - a route that is down should
+    /// not be hammered - and resumes as soon as a real sale reaches the server.
+    /// </summary>
+    private async Task KeepWarmAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_config.ApiKey) ||
+            !Uri.TryCreate(_config.ApiEndpoint, UriKind.Absolute, out _) ||
+            Volatile.Read(ref _keepWarmFailures) >= KeepWarmFailureBackoff ||
+            Interlocked.Exchange(ref _keepWarmInFlight, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Head, BaseUri());
+            using var response = await _http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, CancellationToken.None);
+            Volatile.Write(ref _keepWarmFailures, 0);
+        }
+        catch
+        {
+            Interlocked.Increment(ref _keepWarmFailures);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _keepWarmInFlight, 0);
+        }
     }
 
     /// <summary>The live API root, re-resolved when the configured endpoint changes.</summary>
@@ -612,6 +680,9 @@ public sealed class FiscalStackClient : IDisposable
         {
             using var content = new StringContent(requestJson, System.Text.Encoding.UTF8, "application/json");
             using var response = await _http.PostAsync(Resolve("fiscalize"), content, cancellationToken);
+            // Reaching the server at all - whatever the status - means the route is
+            // live again, so let the keep-warm pings resume after any earlier backoff.
+            Volatile.Write(ref _keepWarmFailures, 0);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
             if (!response.IsSuccessStatusCode)
@@ -805,6 +876,7 @@ public sealed class FiscalStackClient : IDisposable
 
     public void Dispose()
     {
+        _keepWarmTimer?.Dispose();
         _http.Dispose();
         _probeHttp.Dispose();
         _fileHttp.Dispose();

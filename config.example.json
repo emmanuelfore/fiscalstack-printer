@@ -7,6 +7,7 @@
   "apiEndpoint": "https://fiscalstack.co.zw/api/v1/",
   "apiKey": "REPLACE_WITH_FISCALSTACK_API_KEY",
   "apiTimeoutSeconds": 30,
+  "apiKeepWarmSeconds": 45,
 
   "ghostscriptPath": "",
   "ghostscriptTimeoutSeconds": 30,

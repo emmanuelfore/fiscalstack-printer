@@ -15,6 +15,22 @@ public enum LedgerStatus
     AmbiguousFailure
 }
 
+/// <summary>
+/// What the till did with a document it had already seen, recorded so the audit line says the
+/// same thing the operator saw at the counter.
+/// </summary>
+public enum DuplicateOutcome
+{
+    /// <summary>Nothing was printed, because a receipt for this document already exists or may do.</summary>
+    Suppressed,
+
+    /// <summary>The fiscal copy on file was printed again, without asking the gateway for a second receipt.</summary>
+    Reprinted,
+
+    /// <summary>The invoice went to FiscalStack again, as another attempt on the one existing record.</summary>
+    Retrying
+}
+
 public sealed class LedgerEntry
 {
     public string Hash { get; set; } = "";
@@ -298,6 +314,45 @@ public sealed class JobLedger
     }
 
     /// <summary>
+    /// The record for these bytes, whether or not it still blocks a second fiscalisation. A
+    /// rejected or held slip that the till prints again is the same document being retried, so its
+    /// attempts belong on this record instead of opening a second one for one invoice.
+    /// </summary>
+    public LedgerEntry? FindByHash(string hash)
+    {
+        lock (_gate)
+        {
+            return _document.Entries.TryGetValue(hash, out var entry) ? Clone(entry) : null;
+        }
+    }
+
+    /// <summary>
+    /// The record for this invoice number on this business date, whatever its outcome. The job
+    /// hash cannot be the identity of a document: re-printing the same slip through a driver
+    /// re-renders its spacing, so the bytes - and therefore the hash - change while the sale stays
+    /// the same one. An absent number means the gateway numbers the receipt itself, and nothing
+    /// here can recognise it, so those jobs stay keyed on their hash alone.
+    /// </summary>
+    public LedgerEntry? FindByInvoice(string? invoiceNumber, string businessDate, string? transactionType)
+    {
+        if (string.IsNullOrWhiteSpace(invoiceNumber))
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            return _document.Entries.Values
+                .Where(entry => string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => entry.BusinessDate == businessDate)
+                .Where(entry => SameDocumentKind(entry, transactionType))
+                .OrderByDescending(entry => entry.UpdatedAt)
+                .Select(Clone)
+                .FirstOrDefault();
+        }
+    }
+
+    /// <summary>
     /// The blocking record for this document number on this business date, when one of the
     /// same kind already owns it. A sale and a credit note carrying the same number are
     /// different documents; the gateway still refuses the second one, but it refuses it out
@@ -324,11 +379,19 @@ public sealed class JobLedger
     }
 
     /// <summary>
-    /// Audits a reprint that was suppressed before fiscalisation. The original
-    /// receipt stays untouched apart from these counters; no new claim is created
-    /// for the duplicate job and therefore no second API request can be sent.
+    /// Audits a re-submission of a document the till has already seen. The original receipt stays
+    /// untouched apart from these counters: no second claim is created for the duplicate job, so
+    /// the day report reads one document with attempts, not one document per press of Print.
     /// </summary>
-    public void RecordDuplicateAttempt(string originalHash, string duplicateHash)
+    public void RecordDuplicateAttempt(string originalHash, string duplicateHash) =>
+        RecordDuplicateAttempt(originalHash, duplicateHash, DuplicateOutcome.Suppressed);
+
+    /// <summary>
+    /// The same audit, naming what the till went on to do with the copy: print nothing, reprint the
+    /// fiscal proof, or send the invoice to the gateway again. "Duplicate" alone is not enough to
+    /// read back over a till roll, because a suppressed copy and a reprinted one look identical.
+    /// </summary>
+    public void RecordDuplicateAttempt(string originalHash, string duplicateHash, DuplicateOutcome outcome)
     {
         lock (_gate)
         {
@@ -346,13 +409,28 @@ public sealed class JobLedger
             entry.UpdatedAt = entry.LastDuplicateAttemptAt.Value;
             SaveLocked();
 
+            var (headline, closing) = outcome switch
+            {
+                DuplicateOutcome.Reprinted => (
+                    "DUPLICATE PRINTED AS A REPRINT",
+                    "The invoice was not fiscalised again; the copy carries the receipt already on" +
+                    $" file (reprints={entry.ReprintCount})."),
+                DuplicateOutcome.Retrying => (
+                    "DUPLICATE NOTED AS A RETRY",
+                    "The earlier attempt on this record did not produce a receipt, so it was sent to" +
+                    " FiscalStack again under the same record."),
+                _ => (
+                    "DUPLICATE PRINT SUPPRESSED",
+                    "No second fiscal receipt was created.")
+            };
+
             _log.Warn(
-                $"DUPLICATE PRINT SUPPRESSED: invoice={entry.InvoiceNumber ?? "-"} " +
+                $"{headline}: invoice={entry.InvoiceNumber ?? "-"} " +
                 $"businessDate={entry.BusinessDate} type={entry.TransactionType ?? "-"} " +
                 $"duplicateJob={Short(duplicateHash)} " +
                 $"originalJob={Short(entry.Hash)} originalStatus={entry.Status} " +
                 $"fiscalCode={entry.FiscalCode ?? "-"} receiptNo={entry.ReceiptNumber?.ToString() ?? "-"} " +
-                $"attempts={entry.DuplicateAttemptCount}. No second fiscal receipt was created.");
+                $"attempts={entry.DuplicateAttemptCount}. {closing}");
         }
     }
 

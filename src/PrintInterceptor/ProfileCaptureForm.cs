@@ -38,6 +38,7 @@ public sealed class ProfileCaptureForm : Form
     private readonly TextBox _title;
     private readonly Button _save;
     private readonly Button _apply;
+    private readonly SplitContainer _split;
 
     private ProfileCapture? _capture;
     private string? _suggestedName;
@@ -158,16 +159,18 @@ public sealed class ProfileCaptureForm : Form
         results.Controls.Add(noteGroup, 0, 2);
         results.SetColumnSpan(noteGroup, 2);
 
-        var split = new SplitContainer
+        // The panel minimum sizes and the splitter position are validated against the
+        // container's own width, which is still its 150px default at this point because
+        // the form has not laid the control out. Setting them here threw
+        // "SplitterDistance must be between Panel1MinSize and Width - Panel2MinSize", so
+        // they are applied in OnLoad once the real width exists.
+        _split = new SplitContainer
         {
             Dock = DockStyle.Fill,
-            Orientation = Orientation.Vertical,
-            SplitterDistance = 420,
-            Panel1MinSize = 260,
-            Panel2MinSize = 380
+            Orientation = Orientation.Vertical
         };
-        split.Panel1.Controls.Add(receiptText);
-        split.Panel2.Controls.Add(results);
+        _split.Panel1.Controls.Add(receiptText);
+        _split.Panel2.Controls.Add(results);
 
         _name = new TextBox { Width = 170 };
         _title = new TextBox { Width = 220 };
@@ -194,7 +197,7 @@ public sealed class ProfileCaptureForm : Form
         footer.Controls.Add(_apply);
         footer.Controls.Add(close);
 
-        Controls.Add(split);
+        Controls.Add(_split);
         Controls.Add(footer);
         Controls.Add(toolbar);
 
@@ -202,6 +205,33 @@ public sealed class ProfileCaptureForm : Form
         AcceptButton = analyse;
 
         ReloadJobs();
+    }
+
+    private const int ReceiptPanelWidth = 420;
+    private const int MinReceiptPanelWidth = 260;
+    private const int MinResultsPanelWidth = 380;
+
+    /// <summary>
+    /// Gives the receipt its reading width and stops either side being crushed to nothing.
+    /// A SplitContainer checks each of these against the width it has right now, and only
+    /// knows that width once the form has laid it out, so the numbers cannot go in the
+    /// constructor. Everything is clamped into the range the control accepts, because the
+    /// window is smaller than the design width on a tightly scaled display.
+    /// </summary>
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+
+        var available = Math.Max(0, _split.Width - _split.SplitterWidth);
+        var panel1Min = Math.Min(MinReceiptPanelWidth, available);
+        var panel2Min = Math.Min(MinResultsPanelWidth, available - panel1Min);
+
+        _split.Panel2MinSize = panel2Min;
+        _split.Panel1MinSize = panel1Min;
+        _split.SplitterDistance = Math.Clamp(
+            ReceiptPanelWidth,
+            panel1Min,
+            Math.Max(panel1Min, available - panel2Min));
     }
 
     private static ListView FieldList()

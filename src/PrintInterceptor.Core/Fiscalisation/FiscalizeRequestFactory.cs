@@ -58,8 +58,10 @@ public static class FiscalizeRequestFactory
         {
             "USD" or "US$" => "USD",
             "ZWG" or "ZWL" or "RTGS" => "ZWG",
-            // The pass-through route takes any ISO 4217 code, so a loti till states its
-            // own money instead of falling back to the gateway default.
+            // Sent as the money the till actually printed, because a fiscal document must name the
+            // currency it took. The gateway's own enum decides what lands: while that is USD | ZWG a
+            // loti sale comes back as VALIDATION_ERROR and the job is Rejected, which is the honest
+            // outcome - re-labelling it here would misstate the sale to cover the error up.
             "LSL" or "M" or "LS" => "LSL",
             _ => null
         };

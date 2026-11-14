@@ -26,8 +26,8 @@ OutputBaseFilename=PrintInterceptor-{#AppVersion}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
 CloseApplications=yes
@@ -73,4 +73,55 @@ begin
     Args := Args + ' -SkipPrinter';
 
   Result := Args;
+end;
+
+// install.ps1 runs hidden from [Run], so Setup never sees its exit code and a till
+// left without a printer or without a service still looks like a clean install. The
+// script writes its result to a status file instead, and this reads it back once
+// everything has run: ssDone is the last step, after all [Run] entries.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  StatusPath, State, Failures, Line, Message, Repair: String;
+  StatusLines: TArrayOfString;
+  I: Integer;
+begin
+  if CurStep <> ssDone then Exit;
+
+  StatusPath := ExpandConstant('{commonappdata}\FiscalStack\PrintInterceptor\install-status.txt');
+  State := 'missing';
+  Failures := '';
+
+  if LoadStringsFromFile(StatusPath, StatusLines) then
+  begin
+    for I := 0 to GetArrayLength(StatusLines) - 1 do
+    begin
+      Line := TrimRight(StatusLines[I]);
+      if Copy(Line, 1, 6) = 'state=' then
+        State := Copy(Line, 7, Length(Line) - 6);
+      if Copy(Line, 1, 8) = 'failure=' then
+      begin
+        if Failures <> '' then Failures := Failures + #13#10;
+        Failures := Failures + Copy(Line, 9, Length(Line) - 8);
+      end;
+    end;
+  end;
+
+  if State = 'ok' then Exit;
+
+  if Failures = '' then
+    Failures := 'install.ps1 left no status at ' + StatusPath + ', so the printer, the'
+      + #13#10 + 'configuration and the run mode may all still be unset.';
+
+  Repair := '  & "' + ExpandConstant('{app}\addprinter.ps1') + '" -PrinterName "{#PrinterName}"'
+    + ' -Port {#RunPort} -Mode Text';
+
+  Message := 'PrintInterceptor was copied to this machine, but the configuration step did not' + #13#10
+    + 'finish (status: ' + State + '). Without the "{#PrinterName}" printer no print job' + #13#10
+    + 'reaches 127.0.0.1:{#RunPort}, so nothing is fiscalised.' + #13#10#13#10 + Failures
+    + #13#10#13#10 + 'Repair from an elevated PowerShell:' + #13#10 + Repair
+    + #13#10#13#10 + 'Then re-run this installer, or start the app manually.';
+
+  Log('Install did not complete: ' + State + '; ' + Failures);
+  if not WizardSilent then
+    MsgBox(Message, mbError, MB_OK);
 end;

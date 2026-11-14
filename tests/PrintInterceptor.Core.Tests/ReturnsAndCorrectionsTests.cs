@@ -28,7 +28,7 @@ public class ReturnsAndCorrectionsTests
         VatRate = 0.15
     };
 
-    private const string ReturnSlip = """
+    private const string PrintedReturnSlip = """
         Store Demo
         RETURN
         Order No.: CN-1001
@@ -43,6 +43,14 @@ public class ReturnsAndCorrectionsTests
         Total: 2.50
         Payment: CASH
         """;
+
+    /// <summary>
+    /// The slip as the tests edit it. A raw string literal carries the line endings of whichever
+    /// checkout built it, so the fixture that says "this POS did not print that line" would leave
+    /// the line in place on a CRLF working copy and the slip would still look complete.
+    /// </summary>
+    private static readonly string ReturnSlip =
+        PrintedReturnSlip.Replace("\r\n", "\n").Replace('\r', '\n');
 
     [Fact]
     public void AReturnAnnouncedAboveTheItemsIsFiledAsACreditNote()

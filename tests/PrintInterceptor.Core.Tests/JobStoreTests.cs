@@ -154,7 +154,11 @@ public sealed class JobStoreTests : IDisposable
         Assert.NotNull(store.SaveOriginalCopy("pdf-hash", raw, JobFormat.Pdf));
 
         Assert.Equal(JobFormat.Pdf, store.RetainedFormat(sourceFile));
-        Assert.EndsWith("original/pdf-hash.pdf", store.RetainedOriginalPath(sourceFile), StringComparison.Ordinal);
+
+        // The archive writes with the separators of the machine it runs on; the assertion reads
+        // the same tail either way.
+        var retained = store.RetainedOriginalPath(sourceFile)!;
+        Assert.EndsWith("original/pdf-hash.pdf", retained.Replace('\\', '/'), StringComparison.Ordinal);
     }
 
     [Fact]
