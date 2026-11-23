@@ -1,5 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Windows.Forms;
 using PrintInterceptor.Core.State;
 
@@ -12,6 +14,18 @@ namespace PrintInterceptor;
 /// </summary>
 internal static class UiTheme
 {
+    private static readonly ToolTip Tips = new()
+    {
+        AutoPopDelay = 12000,
+        InitialDelay = 250,
+        ReshowDelay = 100,
+        ShowAlways = true,
+        UseFading = true,
+        UseAnimation = true,
+        BackColor = Color.FromArgb(255, 255, 225),
+        ForeColor = Color.FromArgb(51, 65, 85)
+    };
+
     public static readonly Color Navy = Color.FromArgb(15, 23, 42);
     public static readonly Color NavySoft = Color.FromArgb(30, 41, 59);
     public static readonly Color Accent = Color.FromArgb(37, 99, 235);
@@ -37,6 +51,125 @@ internal static class UiTheme
         new("Segoe UI", size, style);
 
     public static Font Mono(float size = 9f) => new("Consolas", size);
+
+    /// <summary>One tooltip style for every truncated value and operator hint.</summary>
+    public static void Tip(Control control, string text)
+    {
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            Tips.SetToolTip(control, text);
+        }
+    }
+
+    private static Icon? _appIcon;
+
+    private static Stream? Resource(string suffix)
+    {
+        var assembly = typeof(UiTheme).Assembly;
+        var name = assembly.GetManifestResourceNames()
+            .FirstOrDefault(value => value.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+        return name is null ? null : assembly.GetManifestResourceStream(name);
+    }
+
+    /// <summary>The same FiscalStack mark is used by the executable, every window and the tray.</summary>
+    public static Icon AppIcon()
+    {
+        if (_appIcon is null)
+        {
+            using var stream = Resource("app-icon.ico")
+                ?? throw new InvalidOperationException("The FiscalStack app icon is missing from the build.");
+            _appIcon = new Icon(stream);
+        }
+
+        return (Icon)_appIcon.Clone();
+    }
+
+    public static Icon? TryAppIcon()
+    {
+        try
+        {
+            return AppIcon();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public static void UseAppIcon(Form form)
+    {
+        var icon = TryAppIcon();
+        if (icon is not null)
+        {
+            form.Icon = icon;
+        }
+    }
+
+    /// <summary>
+    /// Embedded pages are Forms with TopLevel=false. WinForms dialogs must be owned by the
+    /// hosting console window, not by that child Form, or ShowDialog can destroy the console.
+    /// </summary>
+    public static IWin32Window DialogOwner(Control control) =>
+        control is Form { TopLevel: true } ? control : control.FindForm() ?? control;
+
+    /// <summary>The compact symbol from the executable icon, used in chrome and printed reports.</summary>
+    public static Image? TryBrandMarkImage(int size)
+    {
+        try
+        {
+            using var icon = AppIcon();
+            using var source = icon.ToBitmap();
+            return new Bitmap(source, size, size);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The compact symbol beside the console title; the full wordmark is used in the rail.</summary>
+    public static PictureBox BrandMark(int size) => new()
+    {
+        Image = TryBrandMarkImage(size),
+        Size = new Size(size, size),
+        SizeMode = PictureBoxSizeMode.Zoom,
+        BackColor = Color.Transparent
+    };
+
+    /// <summary>Operator-supplied FiscalStack logo, contained without cropping or a grey box.</summary>
+    public static PictureBox BrandLogo(int width, int height)
+    {
+        var picture = new PictureBox
+        {
+            Size = new Size(width, height),
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BackColor = Color.Transparent
+        };
+
+        using var stream = Resource("logo.png");
+        if (stream is null)
+        {
+            return picture;
+        }
+
+        using var source = new Bitmap(stream);
+        var scaled = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(scaled))
+        {
+            graphics.Clear(Color.Transparent);
+            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            var ratio = Math.Min((float)width / source.Width, (float)height / source.Height);
+            var targetWidth = (int)Math.Round(source.Width * ratio);
+            var targetHeight = (int)Math.Round(source.Height * ratio);
+            graphics.DrawImage(
+                source,
+                new Rectangle((width - targetWidth) / 2, (height - targetHeight) / 2, targetWidth, targetHeight));
+        }
+
+        picture.Image = scaled;
+        return picture;
+    }
 
     public static Label Heading(string text) => new()
     {
@@ -133,11 +266,71 @@ internal static class UiTheme
         control.BackColor = Surface;
         control.ForeColor = Text;
         control.Padding = new Padding(6, 4, 6, 4);
-        if (control is TextBoxBase text)
+        switch (control)
         {
-            text.BorderStyle = BorderStyle.FixedSingle;
+            case TextBoxBase text:
+                text.BorderStyle = BorderStyle.FixedSingle;
+                break;
+            case ComboBox combo:
+                combo.FlatStyle = FlatStyle.Flat;
+                break;
+            case NumericUpDown numeric:
+                numeric.BorderStyle = BorderStyle.FixedSingle;
+                break;
+            case DateTimePicker picker:
+                picker.CalendarForeColor = Text;
+                picker.CalendarMonthBackground = Surface;
+                picker.CalendarTitleBackColor = Accent;
+                picker.CalendarTitleForeColor = Color.White;
+                break;
         }
     }
+
+    /// <summary>Masked credential input, kept in the same visual language as every other field.</summary>
+    public static void Password(TextBox box, string placeholder = "not configured")
+    {
+        Input(box);
+        box.UseSystemPasswordChar = true;
+        box.PlaceholderText = placeholder;
+    }
+
+    public static void Check(Control control)
+    {
+        control.Font = Ui(9f);
+        control.ForeColor = Text;
+        control.BackColor = Color.Transparent;
+        control.Padding = new Padding(2, 3, 2, 3);
+    }
+
+    /// <summary>A soft, bordered note used for reasons, next steps and other operator guidance.</summary>
+    public static CardPanel Notice(string title, string body, Color? back = null, Color? accent = null)
+    {
+        var background = back ?? InfoBg;
+        var edge = accent ?? Accent;
+        var card = new CardPanel
+        {
+            CardBackColor = background,
+            CardBorderColor = edge,
+            CornerRadius = 10,
+            Padding = new Padding(12, 10, 12, 10)
+        };
+        var text = new Label
+        {
+            Text = SafeText(title + Environment.NewLine + Environment.NewLine + body),
+            Dock = DockStyle.Fill,
+            Font = Ui(8.5f),
+            ForeColor = Text,
+            BackColor = Color.Transparent,
+            AutoSize = false
+        };
+        card.Controls.Add(text);
+        card.Tag = text;
+        return card;
+    }
+
+    /// <summary>Double ampersands so WinForms prints a literal & in a button or label.</summary>
+    public static string SafeText(string value) =>
+        string.IsNullOrEmpty(value) ? value : value.Replace("&", "&&");
 
     public static void StyleGrid(DataGridView grid)
     {

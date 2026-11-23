@@ -62,19 +62,21 @@ public sealed class FiscalStatusForm : Form
         _log = log;
 
         Text = "Fiscal status";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = false;
         ShowInTaskbar = true;
         ClientSize = new Size(660, 590);
         MinimumSize = new Size(560, 480);
-        Font = new Font("Segoe UI", 9f);
+        BackColor = UiTheme.Canvas;
+        Font = UiTheme.Ui(9f);
 
         _companyName = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI", 13f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(15, 23, 42),
+            Font = UiTheme.Ui(13f, FontStyle.Bold),
+            ForeColor = UiTheme.Text,
             Location = new Point(16, 12)
         };
         _companyIdent = new Label
@@ -95,6 +97,7 @@ public sealed class FiscalStatusForm : Form
             SizeMode = PictureBoxSizeMode.Zoom,
             Size = new Size(104, 64),
             Location = new Point(520, 12),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
             BackColor = Color.Transparent
         };
 
@@ -102,7 +105,7 @@ public sealed class FiscalStatusForm : Form
         {
             Dock = DockStyle.Top,
             Height = 92,
-            BackColor = Color.White,
+            BackColor = UiTheme.Surface,
             Padding = new Padding(4)
         };
         header.Controls.Add(_companyName);
@@ -120,7 +123,7 @@ public sealed class FiscalStatusForm : Form
         _closeError = ValueLabel();
         _checkedAt = ValueLabel();
 
-        var statusTab = new TabPage("Status") { Padding = new Padding(12) };
+        var statusTab = new TabPage("Status") { Padding = new Padding(12), BackColor = UiTheme.Surface };
         var statusGrid = Grid();
         AddRow(statusGrid, "Connection", _connection, bold: true);
         AddRow(statusGrid, "Device ID", _deviceId);
@@ -165,7 +168,7 @@ public sealed class FiscalStatusForm : Form
         _cardSerial = ValueLabel();
         _cardLogoUrl = ValueLabel();
 
-        var cardTab = new TabPage("Card details") { Padding = new Padding(12) };
+        var cardTab = new TabPage("Card details") { Padding = new Padding(12), BackColor = UiTheme.Surface };
         var cardGrid = Grid();
         AddRow(cardGrid, "TIN", _cardTin);
         AddRow(cardGrid, "VAT number", _cardVat);
@@ -177,17 +180,20 @@ public sealed class FiscalStatusForm : Form
         AddRow(cardGrid, "Logo URL", _cardLogoUrl);
         cardTab.Controls.Add(cardGrid);
 
-        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var tabs = new TabControl { Dock = DockStyle.Fill, Font = UiTheme.Ui(9f), BackColor = UiTheme.Surface };
         tabs.TabPages.Add(statusTab);
         tabs.TabPages.Add(cardTab);
 
-        _refresh = new Button { Text = "Refresh", AutoSize = true, MinimumSize = new Size(92, 30) };
+        _refresh = new Button { Text = "Refresh", AutoSize = true, MinimumSize = new Size(92, 34) };
+        UiTheme.Secondary(_refresh);
         _refresh.Click += async (_, _) => await RefreshAsync();
 
-        _openDay = new Button { Text = "Open fiscal day", AutoSize = true, MinimumSize = new Size(118, 30) };
+        _openDay = new Button { Text = "Open fiscal day", AutoSize = true, MinimumSize = new Size(118, 34) };
+        UiTheme.Secondary(_openDay);
         _openDay.Click += async (_, _) => await OpenDayAsync();
 
-        _closeDay = new Button { Text = "Close fiscal day", AutoSize = true, MinimumSize = new Size(118, 30) };
+        _closeDay = new Button { Text = "Close fiscal day", AutoSize = true, MinimumSize = new Size(118, 34) };
+        UiTheme.Primary(_closeDay);
         _closeDay.Click += async (_, _) => await CloseDayAsync();
 
         _busy = new Label

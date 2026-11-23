@@ -87,6 +87,33 @@ public static class Program
 
         var log = new FileLog(Path.Combine(config.ResolveDataDirectory(), "logs"), consoleMode || trayMode);
 
+        // WinForms dialogs are operator-facing; a crash in one must leave a full
+        // stack in the log instead of only the terse default "unhandled" dialog.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            log.Error("Unhandled WinForms exception", e.Exception);
+            MessageBox.Show(
+                "The operator console hit an error." + Environment.NewLine + Environment.NewLine +
+                e.Exception.Message + Environment.NewLine + Environment.NewLine +
+                "The full stack is in the PrintInterceptor log. The tray stays available.",
+                "PrintInterceptor",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            if (e.ExceptionObject is Exception ex)
+            {
+                log.Error("Unhandled application exception", ex);
+            }
+        };
+
+        if (!string.IsNullOrWhiteSpace(config.RecoveryNote))
+        {
+            log.Warn(config.RecoveryNote);
+        }
+
         if (!configExisted)
         {
             log.Warn($"Created a default configuration at {configPath}. Register the API key with --register-key (or Settings) and set the printing options, then restart.");

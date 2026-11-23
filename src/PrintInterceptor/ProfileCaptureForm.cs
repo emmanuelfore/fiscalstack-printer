@@ -61,10 +61,13 @@ public sealed class ProfileCaptureForm : Form
         _log = log;
 
         Text = "Capture a receipt layout profile";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         ShowInTaskbar = true;
         TopMost = true;
+        BackColor = UiTheme.Canvas;
+        Font = UiTheme.Ui(9f);
         ClientSize = new Size(1120, 720);
         MinimumSize = new Size(900, 560);
 
@@ -73,15 +76,20 @@ public sealed class ProfileCaptureForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList,
             Width = 420
         };
+        UiTheme.Input(_job);
+        UiTheme.Tip(_job, "A job captured by this till, including jobs held for review.");
         _job.SelectedIndexChanged += (_, _) => LoadSelectedJob();
 
         var fromFile = new Button { Text = "From file…", AutoSize = true };
+        UiTheme.Secondary(fromFile);
         fromFile.Click += (_, _) => LoadFromFile();
 
         var analyse = new Button { Text = "Analyse", AutoSize = true };
+        UiTheme.Secondary(analyse);
         analyse.Click += (_, _) => Analyse();
 
         var regression = new Button { Text = "Run on last 20", AutoSize = true };
+        UiTheme.Secondary(regression);
         regression.Click += (_, _) => RunRegression();
 
         _reparseTimer.Tick += (_, _) =>
@@ -102,7 +110,7 @@ public sealed class ProfileCaptureForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(10, 8, 10, 4)
         };
-        toolbar.Controls.Add(new Label { Text = "Receipt:", AutoSize = true, Margin = new Padding(3, 8, 6, 3) });
+        toolbar.Controls.Add(Caption("Receipt:", new Padding(3, 8, 6, 3)));
         toolbar.Controls.Add(_job);
         toolbar.Controls.Add(fromFile);
         toolbar.Controls.Add(analyse);
@@ -113,10 +121,10 @@ public sealed class ProfileCaptureForm : Form
             Dock = DockStyle.Fill,
             Multiline = true,
             ScrollBars = ScrollBars.Vertical,
-            HideSelection = false,
-            Font = new Font("Consolas", 9f),
-            BorderStyle = BorderStyle.FixedSingle
+            HideSelection = false
         };
+        UiTheme.Input(_receipt);
+        _receipt.Font = UiTheme.Mono(9f);
 
         _receipt.TextChanged += (_, _) =>
         {
@@ -144,7 +152,10 @@ public sealed class ProfileCaptureForm : Form
             FullRowSelect = true,
             GridLines = true,
             MultiSelect = false,
-            HideSelection = false
+            HideSelection = false,
+            BackColor = UiTheme.Surface,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(9f)
         };
         _suggestions.Columns.Add("Profile rule", 210);
         _suggestions.Columns.Add("Values it writes", 300);
@@ -156,10 +167,10 @@ public sealed class ProfileCaptureForm : Form
             Dock = DockStyle.Fill,
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            BackColor = Color.FromArgb(252, 250, 240),
-            BorderStyle = BorderStyle.FixedSingle
+            ScrollBars = ScrollBars.Vertical
         };
+        UiTheme.Input(_notes);
+        _notes.BackColor = UiTheme.InfoBg;
 
         var results = new TableLayoutPanel
         {
@@ -196,14 +207,20 @@ public sealed class ProfileCaptureForm : Form
         _split.Panel1.Controls.Add(receiptText);
         _split.Panel2.Controls.Add(results);
 
-        _name = new TextBox { Width = 170 };
-        _title = new TextBox { Width = 220 };
+        _name = new TextBox { Width = 230, PlaceholderText = "palladium" };
+        UiTheme.Input(_name);
+        UiTheme.Tip(_name, "Lower-case id used by the profile file name. Up to 40 characters.");
+        _title = new TextBox { Width = 290, PlaceholderText = "Eximium Premium Brands" };
+        UiTheme.Input(_title);
 
         _save = new Button { Text = "Save profile", AutoSize = true, Enabled = false };
+        UiTheme.Secondary(_save);
         _save.Click += (_, _) => SaveProfile(apply: false);
         _apply = new Button { Text = "Save and use now", AutoSize = true, Enabled = false };
+        UiTheme.Primary(_apply);
         _apply.Click += (_, _) => SaveProfile(apply: true);
-        var close = new Button { Text = "Close", Width = 90, DialogResult = DialogResult.Cancel };
+        var close = new Button { Text = "Close", MinimumSize = new Size(96, 34), DialogResult = DialogResult.Cancel };
+        UiTheme.Secondary(close);
 
         var footer = new FlowLayoutPanel
         {
@@ -213,9 +230,9 @@ public sealed class ProfileCaptureForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(10, 6, 10, 8)
         };
-        footer.Controls.Add(new Label { Text = "Profile id:", AutoSize = true, Margin = new Padding(3, 8, 4, 3) });
+        footer.Controls.Add(Caption("Profile id:", new Padding(3, 8, 4, 3)));
         footer.Controls.Add(_name);
-        footer.Controls.Add(new Label { Text = "Shown as:", AutoSize = true, Margin = new Padding(10, 8, 4, 3) });
+        footer.Controls.Add(Caption("Shown as:", new Padding(10, 8, 4, 3)));
         footer.Controls.Add(_title);
         footer.Controls.Add(_save);
         footer.Controls.Add(_apply);
@@ -258,6 +275,13 @@ public sealed class ProfileCaptureForm : Form
             Math.Max(panel1Min, available - panel2Min));
     }
 
+    private static Label Caption(string text, Padding margin)
+    {
+        var label = UiTheme.SectionLabel(UiTheme.SafeText(text));
+        label.Margin = margin;
+        return label;
+    }
+
     private static ListView FieldList()
     {
         var list = new ListView
@@ -267,7 +291,10 @@ public sealed class ProfileCaptureForm : Form
             FullRowSelect = true,
             GridLines = true,
             MultiSelect = false,
-            HideSelection = false
+            HideSelection = false,
+            BackColor = UiTheme.Surface,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(9f)
         };
         list.Columns.Add("Field", 150);
         list.Columns.Add("Read", 170);
@@ -281,7 +308,10 @@ public sealed class ProfileCaptureForm : Form
         {
             Text = caption,
             Dock = DockStyle.Fill,
-            Padding = new Padding(8)
+            Padding = new Padding(8),
+            BackColor = UiTheme.Surface,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(9f, FontStyle.Bold)
         };
         var host = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
         host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -298,7 +328,10 @@ public sealed class ProfileCaptureForm : Form
         {
             Text = caption,
             Dock = DockStyle.Fill,
-            Padding = new Padding(8)
+            Padding = new Padding(8),
+            BackColor = UiTheme.Surface,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(9f, FontStyle.Bold)
         };
         group.Controls.Add(content);
         return group;

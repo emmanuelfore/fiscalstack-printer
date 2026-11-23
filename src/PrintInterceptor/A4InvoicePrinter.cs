@@ -30,6 +30,41 @@ internal static class A4InvoicePrinter
     public static void ExportPdf(ReceiptPrintModel model, string outputPdfPath, ILog log) =>
         PrintCore(model, log, printerOverride: "Microsoft Print to PDF", outputPdfPath);
 
+    /// <summary>
+    /// Draws page one of the same A4 layout into an in-memory image for the operator preview.
+    /// It never picks a printer and never alters the model; long documents simply show page one.
+    /// The caller owns the returned image.
+    /// </summary>
+    public static Image RenderPreview(ReceiptPrintModel model, ILog log, int width = 620)
+    {
+        var height = (int)Math.Round(width * A4Height / (float)A4Width);
+        var bitmap = new Bitmap(width, height);
+        try
+        {
+            using var graphics = Graphics.FromImage(bitmap);
+            graphics.Clear(Color.White);
+            graphics.PageUnit = GraphicsUnit.Display;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+            var pageBounds = new Rectangle(0, 0, A4Width, A4Height);
+            var pageSettings = new PageSettings
+            {
+                PaperSize = new PaperSize("A4", A4Width, A4Height),
+                Margins = new Margins(0, 0, 0, 0)
+            };
+            var args = new PrintPageEventArgs(graphics, pageBounds, pageBounds, pageSettings);
+            using var session = new InvoiceSession(model, log);
+            session.DrawPage(args);
+            return bitmap;
+        }
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
+    }
+
     private static void PrintCore(
         ReceiptPrintModel model,
         ILog log,

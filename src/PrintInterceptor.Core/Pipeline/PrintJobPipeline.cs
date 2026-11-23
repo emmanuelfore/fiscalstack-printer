@@ -105,7 +105,10 @@ public sealed class PrintJobPipeline : IJobProcessor
                 parse.Receipt?.InvoiceNumber,
                 parse.Receipt?.BusinessDateKey ?? DateTimeOffset.Now.ToString("yyyyMMdd"),
                 reason,
-                sourceFile);
+                sourceFile,
+                reviewStage: "Parse",
+                reviewHint: ParseReviewHint(reason),
+                reviewWarnings: parse.Warnings);
             return;
         }
 
@@ -115,7 +118,14 @@ public sealed class PrintJobPipeline : IJobProcessor
         {
             const string reason = "apiKey is not configured; the receipt was not fiscalised.";
             _log.Error(reason);
-            _ledger.RecordNeedsReview(hash, receipt.InvoiceNumber, receipt.BusinessDateKey, reason, sourceFile);
+            _ledger.RecordNeedsReview(
+                hash,
+                receipt.InvoiceNumber,
+                receipt.BusinessDateKey,
+                reason,
+                sourceFile,
+                reviewStage: "Configuration",
+                reviewHint: "Add the API key in Settings, then print the sale again from the POS. This held job is not sent automatically.");
             return;
         }
 
@@ -177,7 +187,13 @@ public sealed class PrintJobPipeline : IJobProcessor
                 "currently-open day: print it on the day of sale, or fix the date the POS writes on the slip.";
             _log.Warn($"Held for review [{Short(record)}]: {stale}");
             _ledger.RecordNeedsReview(
-                record, receipt.InvoiceNumber, receipt.BusinessDateKey, stale, sourceFile);
+                record,
+                receipt.InvoiceNumber,
+                receipt.BusinessDateKey,
+                stale,
+                sourceFile,
+                reviewStage: "Document date",
+                reviewHint: "Print the sale on the current fiscal day or correct the POS date, then print it again.");
             return;
         }
 
@@ -433,7 +449,12 @@ public sealed class PrintJobPipeline : IJobProcessor
                 var reason =
                     "The receipt is not on the server and the request body was not retained, so it cannot be " +
                     "re-sent. Turn storage.retainJobs on, or fiscalise the sale again from the till.";
-                _ledger.MarkFailure(entry.Hash, LedgerStatus.NeedsReview, reason);
+                _ledger.MarkFailure(
+                    entry.Hash,
+                    LedgerStatus.NeedsReview,
+                    reason,
+                    reviewStage: "Reconciliation",
+                    reviewHint: "Turn on storage.retainJobs and reprint the sale from the POS, or resolve the original receipt in FiscalStack before closing the day.");
                 _log.Error($"Reconciliation stopped [{Short(entry.Hash)}]: {reason}");
                 continue;
             }
@@ -565,7 +586,12 @@ public sealed class PrintJobPipeline : IJobProcessor
                 $"The server has an invoice {invoice.InvoiceNumber} but its total is " +
                 $"{serverTotal:0.00} {invoice.Currency ?? entry.Currency}, not {entry.Total:0.00} {entry.Currency}. " +
                 "That is somebody else's receipt, so it was not adopted. Check the dashboard before resending.";
-            _ledger.MarkFailure(entry.Hash, LedgerStatus.NeedsReview, reason);
+            _ledger.MarkFailure(
+                entry.Hash,
+                LedgerStatus.NeedsReview,
+                reason,
+                reviewStage: "Reconciliation",
+                reviewHint: "Check FiscalStack for the matching invoice before resending. Do not close the fiscal day until the receipt is resolved.");
             _log.Error($"Reconciliation stopped [{Short(entry.Hash)}]: {reason}");
             return Adoption.Mismatched;
         }
@@ -678,7 +704,12 @@ public sealed class PrintJobPipeline : IJobProcessor
             }
 
             _log.Error($"Fiscalisation SKIPPED [{Short(hash)}]: {reason}. No receipt was printed.");
-            _ledger.MarkFailure(hash, LedgerStatus.NeedsReview, reason);
+            _ledger.MarkFailure(
+                hash,
+                LedgerStatus.NeedsReview,
+                reason,
+                reviewStage: "Offline signing",
+                reviewHint: "Check offline provisioning in Settings and Refresh from FiscalStack, then print the sale again.");
             return;
         }
 
@@ -686,7 +717,13 @@ public sealed class PrintJobPipeline : IJobProcessor
         {
             const string reason = "The offline receipt was signed but its protected copy was not retained.";
             _log.Error($"Fiscalisation SKIPPED [{Short(hash)}]: {reason}");
-            _ledger.MarkFailure(hash, LedgerStatus.NeedsReview, reason, offlineOrigin: true);
+            _ledger.MarkFailure(
+                hash,
+                LedgerStatus.NeedsReview,
+                reason,
+                offlineOrigin: true,
+                reviewStage: "Offline safety",
+                reviewHint: "A signed receipt exists but cannot be queued safely. Check offline-recovery and the log; do not reprint this sale.");
             return;
         }
 
@@ -701,7 +738,12 @@ public sealed class PrintJobPipeline : IJobProcessor
                 "It remains in protected recovery and will be queued at restart; do not reprint this sale.";
             _log.Error($"Fiscalisation SKIPPED [{Short(hash)}]: {prefix} {queueError}");
             _ledger.MarkFailure(
-                hash, LedgerStatus.NeedsReview, $"{prefix} {queueError}", offlineOrigin: true);
+                hash,
+                LedgerStatus.NeedsReview,
+                $"{prefix} {queueError}",
+                offlineOrigin: true,
+                reviewStage: "Offline queue",
+                reviewHint: "The signed receipt is in protected recovery and will queue at restart. Do not reprint this sale.");
             return;
         }
 
@@ -1101,6 +1143,17 @@ public sealed class PrintJobPipeline : IJobProcessor
             })
             .ToList();
     }
+
+    /// <summary>
+    /// Turns a parser reason into the next action an operator can actually take. The reason is
+    /// already specific; this makes it obvious that nothing was sent to FiscalStack and where to
+    /// repair the layout.
+    /// </summary>
+    private static string ParseReviewHint(string reason) =>
+        reason.Contains("return", StringComparison.OrdinalIgnoreCase) ||
+        reason.Contains("credit note", StringComparison.OrdinalIgnoreCase)
+            ? "Ask the POS to print the return as its own credit note, then capture the corrected slip. No receipt was sent to FiscalStack."
+            : "Open Parse rules → Test a receipt with the retained source. After the rule is corrected, print the sale again from the POS.";
 
     private static string Short(string hash) => hash[..Math.Min(12, hash.Length)];
 }

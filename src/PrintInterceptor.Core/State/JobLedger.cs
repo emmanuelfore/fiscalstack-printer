@@ -58,7 +58,62 @@ public sealed class LedgerEntry
     public int? FiscalDayNo { get; set; }
     public string PrintStatus { get; set; } = "NotRequested";
     public string? PrintError { get; set; }
+
+    /// <summary>The human reason a job was held. Never blank for a NeedsReview entry.</summary>
     public string? Error { get; set; }
+
+    /// <summary>Where the hold happened: parse, configuration, date, reconciliation or offline signing.</summary>
+    public string? ReviewStage { get; set; }
+
+    /// <summary>The operator's next action. Shown wherever the hold count is shown.</summary>
+    public string? ReviewHint { get; set; }
+
+    /// <summary>Parser warnings that accompanied the hold; previously log-only and invisible in the UI.</summary>
+    public string[] ReviewWarnings { get; set; } = Array.Empty<string>();
+
+    // Display fallbacks for jobs captured before the review fields were added. They are derived
+    // only from the retained reason, so an older ledger still explains itself without changing
+    // whether the job may be fiscalised.
+
+    [JsonIgnore]
+    public string ReviewStageText =>
+        string.IsNullOrWhiteSpace(ReviewStage) ? "Review" : ReviewStage!;
+
+    [JsonIgnore]
+    public string ReviewReasonText =>
+        string.IsNullOrWhiteSpace(Error) ? "Cause not recorded in the ledger." : Error!;
+
+    [JsonIgnore]
+    public string ReviewNextStepText
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(ReviewHint))
+            {
+                return ReviewHint!;
+            }
+
+            var reason = Error ?? "";
+            if (reason.Contains("return", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("credit note", StringComparison.OrdinalIgnoreCase) ||
+                reason.Contains("negative amount", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Ask the POS to print the return as its own credit note, then capture the corrected slip. No receipt was sent to FiscalStack.";
+            }
+
+            if (reason.Contains("parse", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Open Parse rules → Test a receipt with the retained source. After the rule is corrected, print the sale again from the POS.";
+            }
+
+            return "Open the job in Fiscalisation jobs for the full reason, correct the source document, then capture it again. No receipt was sent to FiscalStack while the job is held.";
+        }
+    }
+
+    [JsonIgnore]
+    public string ReviewWarningsText =>
+        ReviewWarnings.Length == 0 ? "None recorded" : string.Join(" | ", ReviewWarnings);
+
     public string? SourceFile { get; set; }
     public string? OfflineSignature { get; set; }
     public string? OfflineReceiptDate { get; set; }
@@ -303,7 +358,7 @@ public sealed class JobLedger
             entry.InvoiceNumber = invoice.InvoiceNumber;
             entry.Total = invoice.Total ?? entry.Total;
             entry.Currency = invoice.Currency ?? entry.Currency;
-            entry.Error = null;
+            ClearReview(entry);
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
         }
@@ -484,7 +539,7 @@ public sealed class JobLedger
             entry.Total = total;
             entry.Currency = currency;
             entry.SourceFile = sourceFile;
-            entry.Error = null;
+            ClearReview(entry);
             entry.UpdatedAt = now;
             entry.PrintStatus = "NotRequested";
             entry.PrintError = null;
@@ -518,7 +573,7 @@ public sealed class JobLedger
             entry.ReceiptGlobalNo = response.Receipt?.ReceiptGlobalNo;
             entry.FiscalDayNo = response.Receipt?.FiscalDayNo;
             entry.InvoiceNumber = response.Receipt?.InvoiceNo ?? entry.InvoiceNumber;
-            entry.Error = null;
+            ClearReview(entry);
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
         }
@@ -547,7 +602,7 @@ public sealed class JobLedger
             entry.OfflineSignature = signed.Signature;
             entry.OfflineReceiptDate = signed.ReceiptDate;
             entry.OfflineOrigin = true;
-            entry.Error = null;
+            ClearReview(entry);
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
         }
@@ -577,7 +632,7 @@ public sealed class JobLedger
             entry.FiscalDayNo = response.Receipt?.FiscalDayNo ?? entry.FiscalDayNo;
             entry.InvoiceNumber = response.Receipt?.InvoiceNo ?? entry.InvoiceNumber;
             entry.SyncedAt = DateTimeOffset.Now;
-            entry.Error = null;
+            ClearReview(entry);
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
         }
@@ -588,7 +643,14 @@ public sealed class JobLedger
     /// has been signed offline it must stay out of online reconciliation, which would otherwise
     /// re-send the pre-offline body.
     /// </summary>
-    public void MarkFailure(string hash, LedgerStatus status, string error, bool offlineOrigin = false)
+    public void MarkFailure(
+        string hash,
+        LedgerStatus status,
+        string error,
+        bool offlineOrigin = false,
+        string? reviewStage = null,
+        string? reviewHint = null,
+        IEnumerable<string>? reviewWarnings = null)
     {
         lock (_gate)
         {
@@ -599,7 +661,20 @@ public sealed class JobLedger
             }
 
             entry.Status = status;
-            entry.Error = error;
+            entry.Error = Unexplained(error, hash);
+            if (status == LedgerStatus.NeedsReview)
+            {
+                entry.ReviewStage = reviewStage ?? "Review";
+                entry.ReviewHint = reviewHint ?? "Open the job in Fiscalisation jobs for the full reason.";
+                entry.ReviewWarnings = reviewWarnings?.ToArray() ?? Array.Empty<string>();
+            }
+            else
+            {
+                // A rejection/ambiguous failure still needs its error text. Only the
+                // hold-specific provenance is stale once the status is no longer a hold.
+                ClearReviewFields(entry);
+            }
+
             entry.OfflineOrigin = entry.OfflineOrigin || offlineOrigin;
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
@@ -611,12 +686,18 @@ public sealed class JobLedger
         string? invoiceNumber,
         string businessDate,
         string reason,
-        string? sourceFile)
+        string? sourceFile,
+        string? reviewStage = null,
+        string? reviewHint = null,
+        IEnumerable<string>? reviewWarnings = null)
     {
         lock (_gate)
         {
             if (_document.Entries.TryGetValue(hash, out var existing) && IsBlocking(existing.Status))
             {
+                _log.Warn(
+                    $"Held for review [{Short(hash)}] was not recorded because {Short(existing.Hash)} already has " +
+                    $"a blocking status ({existing.Status}): {reason}");
                 return;
             }
 
@@ -625,12 +706,33 @@ public sealed class JobLedger
             entry.InvoiceNumber = invoiceNumber;
             entry.BusinessDate = businessDate;
             entry.Status = LedgerStatus.NeedsReview;
-            entry.Error = reason;
+            entry.Error = Unexplained(reason, hash);
+            entry.ReviewStage = reviewStage ?? "Review";
+            entry.ReviewHint = reviewHint ?? "Open the job in Fiscalisation jobs for the full reason.";
+            entry.ReviewWarnings = reviewWarnings?.ToArray() ?? Array.Empty<string>();
             entry.SourceFile = sourceFile;
             entry.UpdatedAt = now;
             _document.Entries[hash] = entry;
             SaveLocked();
         }
+    }
+
+    private static string Unexplained(string? reason, string hash) =>
+        string.IsNullOrWhiteSpace(reason)
+            ? $"The fiscalisation job [{Short(hash)}] was held, but no reason was recorded. Check the log for this job hash."
+            : reason!;
+
+    private static void ClearReview(LedgerEntry entry)
+    {
+        entry.Error = null;
+        ClearReviewFields(entry);
+    }
+
+    private static void ClearReviewFields(LedgerEntry entry)
+    {
+        entry.ReviewStage = null;
+        entry.ReviewHint = null;
+        entry.ReviewWarnings = Array.Empty<string>();
     }
 
     /// <summary>
@@ -739,6 +841,11 @@ public sealed class JobLedger
                 throw new InvalidOperationException("ledger.json is empty");
             }
 
+            foreach (var entry in document.Entries.Values)
+            {
+                entry.ReviewWarnings ??= Array.Empty<string>();
+            }
+
             _log.Info($"Ledger loaded: {document.Entries.Count} entries.");
             return document;
         }
@@ -791,6 +898,9 @@ public sealed class JobLedger
         PrintStatus = entry.PrintStatus,
         PrintError = entry.PrintError,
         Error = entry.Error,
+        ReviewStage = entry.ReviewStage,
+        ReviewHint = entry.ReviewHint,
+        ReviewWarnings = entry.ReviewWarnings.ToArray(),
         SourceFile = entry.SourceFile,
         OfflineSignature = entry.OfflineSignature,
         OfflineReceiptDate = entry.OfflineReceiptDate,

@@ -53,6 +53,73 @@ public class InterceptorConfigTests
     }
 
     [Fact]
+    public void UnreadableConfigIsBackedUpAndRecreated()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "printinterceptor-tests-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllBytes(path, new byte[256]);
+
+            var config = InterceptorConfig.LoadOrCreate(path);
+
+            Assert.Empty(config.Validate());
+            Assert.NotNull(config.RecoveryNote);
+            Assert.Contains(".corrupt-", config.RecoveryNote);
+
+            var backups = Directory.GetFiles(directory, "config.json.corrupt-*");
+            Assert.Single(backups);
+            Assert.Equal(256, new FileInfo(backups[0]).Length);
+            Assert.True(new FileInfo(path).Length > 0);
+            Assert.Empty(InterceptorConfig.LoadOrCreate(path).Validate());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void InstallerNullStringsBecomeEmptyStrings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "printinterceptor-tests-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(path, """
+                {
+                  "listenPort": 9100,
+                  "apiKey": null,
+                  "ghostscriptPath": null,
+                  "printing": { "printerName": null, "a4PrinterName": null }
+                }
+                """);
+
+            var config = InterceptorConfig.LoadOrCreate(path);
+
+            Assert.Equal("", config.ApiKey);
+            Assert.Equal("", config.GhostscriptPath);
+            Assert.Equal("", config.Printing.PrinterName);
+            Assert.Equal("", config.Printing.A4PrinterName);
+            Assert.Empty(config.Validate());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void RejectsMalformedSettings()
     {
         var config = new InterceptorConfig

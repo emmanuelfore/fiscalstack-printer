@@ -114,6 +114,7 @@ public sealed class DashboardForm : Form
         _server = server;
 
         Text = "PrintInterceptor — Operator console";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1240, 760);
         MinimumSize = new Size(1060, 640);
@@ -207,9 +208,9 @@ public sealed class DashboardForm : Form
         _recentFilter = new ComboBox
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
-            Width = 170,
-            Font = UiTheme.Ui(9f)
+            Width = 170
         };
+        UiTheme.Input(_recentFilter);
         _recentFilter.Items.AddRange(new object[] { "All jobs", "Needs review", "Failures", "Fiscalised" });
         _recentFilter.SelectedIndex = 0;
         _recentFilter.SelectedIndexChanged += (_, _) => FillRecent();
@@ -252,6 +253,30 @@ public sealed class DashboardForm : Form
             DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
         });
         _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Print", Width = 104 });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            HeaderText = "Why / next step",
+            Width = 320,
+            MinimumWidth = 180
+        });
+        _recent.Columns[6].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        _recent.RowTemplate.Height = 44;
+        _recent.CellToolTipTextNeeded += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || e.RowIndex >= _recent.Rows.Count)
+            {
+                return;
+            }
+
+            if (_recent.Rows[e.RowIndex].Tag is LedgerEntry hold &&
+                (hold.Status == LedgerStatus.NeedsReview || !string.IsNullOrWhiteSpace(hold.Error)))
+            {
+                e.ToolTipText = FullHoldText(hold);
+                return;
+            }
+
+            e.ToolTipText = _recent.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? "";
+        };
         _recent.CellDoubleClick += (_, _) => OpenJobs();
         _recent.CellPainting += (_, e) =>
         {
@@ -469,25 +494,25 @@ public sealed class DashboardForm : Form
             BackColor = UiTheme.Navy
         };
 
-        var title = new Label
-        {
-            Text = "FiscalStack",
-            Dock = DockStyle.Top,
-            Height = 44,
-            Font = UiTheme.Ui(14f, FontStyle.Bold),
-            ForeColor = Color.White,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(16, 0, 8, 0)
-        };
+        var brand = new Panel { Dock = DockStyle.Top, Height = 88 };
+        var logo = UiTheme.BrandLogo(190, 42);
+        logo.Location = new Point(10, 6);
+        var caption = new Panel { Location = new Point(12, 52), Size = new Size(190, 26) };
+        var mark = UiTheme.BrandMark(18);
+        mark.Dock = DockStyle.Left;
         var subtitle = new Label
         {
             Text = "PrintInterceptor console",
-            Dock = DockStyle.Top,
-            Height = 28,
+            Dock = DockStyle.Fill,
+            Font = UiTheme.Ui(8.5f),
             ForeColor = Color.FromArgb(148, 163, 184),
             TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(16, 0, 8, 0)
+            Padding = new Padding(8, 0, 0, 0)
         };
+        caption.Controls.Add(subtitle);
+        caption.Controls.Add(mark);
+        brand.Controls.Add(caption);
+        brand.Controls.Add(logo);
 
         var nav = new FlowLayoutPanel
         {
@@ -527,8 +552,7 @@ public sealed class DashboardForm : Form
 
         sidebar.Controls.Add(nav);
         sidebar.Controls.Add(footer);
-        sidebar.Controls.Add(subtitle);
-        sidebar.Controls.Add(title);
+        sidebar.Controls.Add(brand);
         return sidebar;
     }
 
@@ -814,9 +838,14 @@ public sealed class DashboardForm : Form
                 .ToList();
 
             _identity.Text = $"{_company.Name} · {_config.ListenAddress}:{_config.ListenPort}";
+            var held = entries.Where(entry => entry.Status == LedgerStatus.NeedsReview).ToList();
             _kpiReceipts.Text = fiscalisedToday.Count.ToString();
             _kpiQueued.Text = (_sync.PendingCount + entries.Count(entry => entry.Status == LedgerStatus.InFlight)).ToString();
-            _kpiReview.Text = entries.Count(entry => entry.Status == LedgerStatus.NeedsReview).ToString();
+            _kpiReview.Text = held.Count.ToString();
+            var latestHold = held.OrderByDescending(entry => entry.UpdatedAt).FirstOrDefault();
+            UiTheme.Tip(_kpiReview, latestHold is null
+                ? "No sales are on hold. A hold is always local to this till and is never sent to ZIMRA."
+                : FullHoldText(latestHold));
 
             var totals = fiscalisedToday
                 .GroupBy(entry => string.IsNullOrWhiteSpace(entry.Currency) ? "—" : entry.Currency)
@@ -894,7 +923,8 @@ public sealed class DashboardForm : Form
                 string.Equals(entry.TransactionType, "CreditNote", StringComparison.OrdinalIgnoreCase) ? "Credit" : "Sale",
                 entry.Status,
                 $"{entry.Currency} {entry.Total:0.00}".Trim(),
-                entry.PrintStatus);
+                entry.PrintStatus,
+                HoldSummary(entry));
             _recent.Rows[index].Tag = entry;
         }
 
@@ -905,17 +935,46 @@ public sealed class DashboardForm : Form
     private void UpdateChecklist(IReadOnlyList<LedgerEntry> entries)
     {
         var pending = _sync.PendingCount + entries.Count(entry => entry.Status == LedgerStatus.InFlight);
-        var review = entries.Count(entry => entry.Status == LedgerStatus.NeedsReview);
+        var held = entries.Where(entry => entry.Status == LedgerStatus.NeedsReview).ToList();
+        var latestHold = held.OrderByDescending(entry => entry.UpdatedAt).FirstOrDefault();
 
         SetCheck(_checkFdms, _deviceStatus is not null, _deviceStatus is null ? "Not reachable / not checked" : "Healthy");
         SetCheck(_checkQueue, pending == 0, pending == 0 ? "OK" : $"{pending} pending");
-        SetCheck(_checkReview, review == 0, review == 0 ? "OK" : $"{review} files");
+        SetCheck(_checkReview, held.Count == 0, held.Count == 0 ? "OK" : $"{held.Count} held — {HoldSummary(latestHold)}");
+        if (latestHold is not null)
+        {
+            UiTheme.Tip(_checkReview, FullHoldText(latestHold));
+        }
     }
 
     private static void SetCheck(Label label, bool ok, string text)
     {
-        label.Text = (ok ? "✓ " : "✕ ") + text;
+        label.Text = UiTheme.SafeText((ok ? "OK — " : "HOLD — ") + text);
         label.ForeColor = ok ? OkColor : BadColor;
+    }
+
+    /// <summary>One-line cause used where space is tight; the full reason and next step are in the tooltip.</summary>
+    private static string HoldSummary(LedgerEntry? entry)
+    {
+        if (entry is null)
+        {
+            return "";
+        }
+
+        return $"{entry.ReviewStageText}: {entry.ReviewReasonText}";
+    }
+
+    private static string FullHoldText(LedgerEntry entry)
+    {
+        var lines = new List<string>
+        {
+            HoldSummary(entry),
+            "Nothing was sent to FiscalStack for this job.",
+            "Next step: " + entry.ReviewNextStepText,
+            "Warnings: " + entry.ReviewWarningsText,
+            "Open Fiscalisation jobs for the full record."
+        };
+        return string.Join(Environment.NewLine, lines);
     }
 
     private void ApplyDeviceStatus()

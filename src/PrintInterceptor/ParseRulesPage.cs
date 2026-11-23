@@ -93,14 +93,14 @@ public sealed class ParseRulesPage : UserControl
 
         _status = new Label
         {
-            AutoSize = false,
-            Width = 340,
-            Height = 34,
+            AutoSize = true,
+            MaximumSize = new Size(620, 44),
             TextAlign = ContentAlignment.MiddleLeft,
             Font = UiTheme.Ui(8.5f),
             ForeColor = UiTheme.Muted,
             Margin = new Padding(8, 0, 8, 0)
         };
+        _status.TextChanged += (_, _) => UiTheme.Tip(_status, _status.Text);
 
         var validate = ActionButton("Validate");
         validate.Click += (_, _) => ValidateDraft();
@@ -290,6 +290,8 @@ public sealed class ParseRulesPage : UserControl
 
         var rules = new DataGridView { Dock = DockStyle.Fill, Height = 180 };
         UiTheme.StyleGrid(rules);
+        rules.RowTemplate.Height = 46;
+        rules.CellToolTipTextNeeded += GridCellTip;
         rules.ReadOnly = false;
         rules.AllowUserToAddRows = true;
         rules.AllowUserToDeleteRows = true;
@@ -328,6 +330,8 @@ public sealed class ParseRulesPage : UserControl
 
         var currencies = new DataGridView { Dock = DockStyle.Fill, Height = 140 };
         UiTheme.StyleGrid(currencies);
+        currencies.RowTemplate.Height = 40;
+        currencies.CellToolTipTextNeeded += GridCellTip;
         currencies.ReadOnly = false;
         currencies.AllowUserToAddRows = true;
         currencies.AllowUserToDeleteRows = true;
@@ -422,7 +426,7 @@ public sealed class ParseRulesPage : UserControl
         {
             if (combo.SelectedValue is not string name)
             {
-                MessageBox.Show(this, "Pick a profile first.", "Parse rules", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(UiTheme.DialogOwner(this), "Pick a profile first.", "Parse rules", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -438,7 +442,7 @@ public sealed class ParseRulesPage : UserControl
             catch (Exception ex)
             {
                 _log.Error("Applying a parse profile from the dashboard failed", ex);
-                MessageBox.Show(this, ex.Message, "Could not apply profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not apply profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
 
@@ -446,7 +450,7 @@ public sealed class ParseRulesPage : UserControl
         import.Click += (_, _) =>
         {
             using var dialog = new OpenFileDialog { Filter = "Parse profile (*.json)|*.json" };
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            if (dialog.ShowDialog(UiTheme.DialogOwner(this)) != DialogResult.OK)
             {
                 return;
             }
@@ -460,7 +464,7 @@ public sealed class ParseRulesPage : UserControl
             catch (Exception ex)
             {
                 _log.Error("Importing a parse profile from the dashboard failed", ex);
-                MessageBox.Show(this, ex.Message, "Could not import profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not import profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
 
@@ -469,7 +473,7 @@ public sealed class ParseRulesPage : UserControl
         {
             if (_draft.ValidateRules().Count > 0)
             {
-                MessageBox.Show(this, "Validate and fix the rules before saving them as a profile.",
+                MessageBox.Show(UiTheme.DialogOwner(this), "Validate and fix the rules before saving them as a profile.",
                     "Parse rules", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -479,7 +483,7 @@ public sealed class ParseRulesPage : UserControl
                 Filter = "Parse profile (*.json)|*.json",
                 FileName = string.IsNullOrWhiteSpace(_draft.Profile) ? "my-pos.json" : _draft.Profile + ".json"
             };
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            if (dialog.ShowDialog(UiTheme.DialogOwner(this)) != DialogResult.OK)
             {
                 return;
             }
@@ -494,7 +498,7 @@ public sealed class ParseRulesPage : UserControl
             catch (Exception ex)
             {
                 _log.Error("Saving a parse profile from the dashboard failed", ex);
-                MessageBox.Show(this, ex.Message, "Could not save profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not save profile", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         };
 
@@ -525,10 +529,10 @@ public sealed class ParseRulesPage : UserControl
         _result.Multiline = true;
         _result.ReadOnly = true;
         _result.ScrollBars = ScrollBars.Vertical;
-        _result.BackColor = UiTheme.Canvas;
-        _result.ForeColor = UiTheme.Text;
-        _result.Font = UiTheme.Mono(9f);
         _result.Height = 200;
+        UiTheme.Input(_result);
+        _result.BackColor = UiTheme.Canvas;
+        _result.Font = UiTheme.Mono(9f);
         AddWideRow(grid, "Reading", _result, 210);
 
         var parse = ActionButton("Read with these rules", primary: true);
@@ -586,7 +590,7 @@ public sealed class ParseRulesPage : UserControl
             : errors.Count + " rule problem(s) — check before saving.";
         if (errors.Count > 0)
         {
-            MessageBox.Show(this, string.Join(Environment.NewLine, errors), "Parse rules",
+            MessageBox.Show(UiTheme.DialogOwner(this), string.Join(Environment.NewLine, errors), "Parse rules",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -603,7 +607,7 @@ public sealed class ParseRulesPage : UserControl
         var errors = _draft.ValidateRules();
         if (errors.Count > 0)
         {
-            MessageBox.Show(this, "These rules cannot be saved:" + Environment.NewLine +
+            MessageBox.Show(UiTheme.DialogOwner(this), "These rules cannot be saved:" + Environment.NewLine +
                                   string.Join(Environment.NewLine, errors),
                 "Parse rules", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -619,7 +623,7 @@ public sealed class ParseRulesPage : UserControl
         catch (Exception ex)
         {
             _log.Error("Saving receipt rules from the dashboard failed", ex);
-            MessageBox.Show(this, ex.Message, "Could not save rules", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not save rules", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -722,6 +726,17 @@ public sealed class ParseRulesPage : UserControl
         grid.Controls.Add(control, 1, grid.RowCount - 1);
     }
 
+    private static void GridCellTip(object? sender, DataGridViewCellToolTipTextNeededEventArgs e)
+    {
+        if (sender is not DataGridView grid || e.RowIndex < 0 || e.ColumnIndex < 0 ||
+            e.RowIndex >= grid.Rows.Count || e.ColumnIndex >= grid.Columns.Count)
+        {
+            return;
+        }
+
+        e.ToolTipText = grid.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? "";
+    }
+
     private static void AddWideRow(TableLayoutPanel grid, string label, Control control, int height)
     {
         grid.RowCount++;
@@ -773,9 +788,9 @@ public sealed class ParseRulesPage : UserControl
         {
             Checked = value,
             AutoSize = true,
-            Font = UiTheme.Ui(9f),
             Margin = new Padding(2, 10, 2, 2)
         };
+        UiTheme.Check(box);
         box.CheckedChanged += (_, _) => changed(box.Checked);
         grid.RowCount++;
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));

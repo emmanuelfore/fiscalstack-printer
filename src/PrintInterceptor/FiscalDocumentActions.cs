@@ -33,6 +33,28 @@ internal static class FiscalDocumentActions
     public static bool CanSavePdf(LedgerEntry entry, PrintSnapshotStore snapshots) =>
         snapshots.ExistsDurable(entry.Hash);
 
+    /// <summary>
+    /// Loads the archived fiscal document for an in-app preview. The reprint stamp is cleared
+    /// only in the returned copy; a PDF export or print still shows REPRINT as required.
+    /// </summary>
+    public static bool TryLoadModel(
+        LedgerEntry entry,
+        PrintSnapshotStore snapshots,
+        out ReceiptPrintModel? model,
+        out string error)
+    {
+        model = snapshots.LoadDurable(entry.Hash);
+        if (model is null)
+        {
+            error = "No fiscal document was archived for this job, so there is nothing to preview.";
+            return false;
+        }
+
+        model.IsReprint = false;
+        error = "";
+        return true;
+    }
+
     public static bool TrySavePdf(
         LedgerEntry entry,
         PrintSnapshotStore snapshots,

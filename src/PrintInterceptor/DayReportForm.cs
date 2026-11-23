@@ -61,6 +61,7 @@ public sealed class DayReportForm : Form
         _dataDirectory = dataDirectory;
 
         Text = "Report centre";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         ShowInTaskbar = true;
@@ -154,7 +155,22 @@ public sealed class DayReportForm : Form
             AllowUserToResizeRows = false
         };
         UiTheme.StyleGrid(_lines);
+        _lines.RowTemplate.Height = 44;
         BuildColumns();
+        foreach (var name in new[] { "Invoice", "Item", "Fiscal code" })
+        {
+            _lines.Columns[name].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        }
+
+        _lines.CellToolTipTextNeeded += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || e.ColumnIndex >= _lines.Columns.Count)
+            {
+                return;
+            }
+
+            e.ToolTipText = _lines.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? "";
+        };
 
         _statement = new TextBox
         {
@@ -164,11 +180,12 @@ public sealed class DayReportForm : Form
             WordWrap = false,
             ScrollBars = ScrollBars.Both,
             BorderStyle = BorderStyle.None,
-            BackColor = UiTheme.Surface,
-            ForeColor = UiTheme.Text,
-            Font = UiTheme.Mono(9f),
             Padding = new Padding(8)
         };
+        UiTheme.Input(_statement);
+        _statement.BorderStyle = BorderStyle.None;
+        _statement.Font = UiTheme.Mono(9f);
+        UiTheme.Tip(_statement, "The original daily statement as produced by FiscalStack.");
 
         var tabs = new TabControl { Dock = DockStyle.Fill, Font = UiTheme.Ui(9f) };
         var linesPage = new TabPage("Fiscal lines") { BackColor = UiTheme.Surface, Padding = new Padding(6) };
@@ -249,13 +266,18 @@ public sealed class DayReportForm : Form
         RefreshReport();
     }
 
-    private static DateTimePicker DatePicker(DateTime value) => new()
+    private static DateTimePicker DatePicker(DateTime value)
     {
-        Format = DateTimePickerFormat.Short,
-        Width = 128,
-        Value = value,
-        Font = UiTheme.Ui(9f)
-    };
+        var picker = new DateTimePicker
+        {
+            Format = DateTimePickerFormat.Short,
+            Width = 132,
+            Value = value
+        };
+        UiTheme.Input(picker);
+        UiTheme.Tip(picker, "Reports are read from the till's fiscal ledger; no request is sent.");
+        return picker;
+    }
 
     private static Button ShortButton(string text)
     {
@@ -282,14 +304,9 @@ public sealed class DayReportForm : Form
             WrapContents = false,
             AutoSize = true
         };
-        stack.Controls.Add(new Label
-        {
-            Text = title,
-            AutoSize = true,
-            ForeColor = UiTheme.Muted,
-            Font = UiTheme.Ui(8.5f),
-            Margin = new Padding(2, 2, 3, 0)
-        });
+        var caption = UiTheme.SectionLabel(UiTheme.SafeText(title));
+        caption.Margin = new Padding(2, 2, 3, 0);
+        stack.Controls.Add(caption);
         stack.Controls.Add(value);
         card.Controls.Add(stack);
         return card;
@@ -297,16 +314,17 @@ public sealed class DayReportForm : Form
 
     private void BuildColumns()
     {
-        _lines.Columns.Add(Column("Business date", 96));
-        _lines.Columns.Add(Column("Invoice", 126));
-        _lines.Columns.Add(Column("Type", 78));
-        _lines.Columns.Add(Column("Item", 210));
-        _lines.Columns.Add(Column("Qty", 52, DataGridViewContentAlignment.MiddleRight));
-        _lines.Columns.Add(Column("Total", 92, DataGridViewContentAlignment.MiddleRight));
-        _lines.Columns.Add(Column("Tax type", 108));
-        _lines.Columns.Add(Column("Rate", 58, DataGridViewContentAlignment.MiddleRight));
-        _lines.Columns.Add(Column("Fiscal code", 150));
-        _lines.Columns.Add(Column("Receipt", 86));
+        _lines.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _lines.Columns.Add(Column("Business date", 104));
+        _lines.Columns.Add(Column("Invoice", 138));
+        _lines.Columns.Add(Column("Type", 92));
+        _lines.Columns.Add(Column("Item", 240));
+        _lines.Columns.Add(Column("Qty", 68, DataGridViewContentAlignment.MiddleRight));
+        _lines.Columns.Add(Column("Total", 112, DataGridViewContentAlignment.MiddleRight));
+        _lines.Columns.Add(Column("Tax type", 110));
+        _lines.Columns.Add(Column("Rate", 72, DataGridViewContentAlignment.MiddleRight));
+        _lines.Columns.Add(Column("Fiscal code", 172));
+        _lines.Columns.Add(Column("Receipt", 96));
     }
 
     private static DataGridViewTextBoxColumn Column(
@@ -315,7 +333,10 @@ public sealed class DayReportForm : Form
         DataGridViewContentAlignment alignment = DataGridViewContentAlignment.MiddleLeft) => new()
     {
         HeaderText = title,
+        Name = title,
         Width = width,
+        MinimumWidth = Math.Max(56, width - 32),
+        FillWeight = width,
         SortMode = DataGridViewColumnSortMode.Automatic,
         DefaultCellStyle = new DataGridViewCellStyle { Alignment = alignment }
     };
@@ -501,7 +522,7 @@ public sealed class DayReportForm : Form
             return;
         }
 
-        MessageBox.Show(this,
+        MessageBox.Show(UiTheme.DialogOwner(this),
             $"The summary was written to:{Environment.NewLine}{path}",
             "Day report saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -519,7 +540,7 @@ public sealed class DayReportForm : Form
 
         if (report.Lines.Count == 0)
         {
-            MessageBox.Show(this,
+            MessageBox.Show(UiTheme.DialogOwner(this),
                 $"No fiscalised line was printed for {report.BusinessDate}, so there is nothing to export.",
                 "Nothing to export", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -534,7 +555,7 @@ public sealed class DayReportForm : Form
             return;
         }
 
-        MessageBox.Show(this,
+        MessageBox.Show(UiTheme.DialogOwner(this),
             $"{report.Lines.Count} line(s) were written to:{Environment.NewLine}{path}",
             "Export written", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -560,13 +581,13 @@ public sealed class DayReportForm : Form
         try
         {
             ReportDocument.Print(report, target);
-            MessageBox.Show(this,
+            MessageBox.Show(UiTheme.DialogOwner(this),
                 $"The report was saved to:{Environment.NewLine}{target}",
                 "PDF report saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Could not save the PDF report",
+            MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not save the PDF report",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -584,7 +605,7 @@ public sealed class DayReportForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "Could not print the report",
+            MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not print the report",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
@@ -599,7 +620,7 @@ public sealed class DayReportForm : Form
             InitialDirectory = Directory.Exists(_dataDirectory) ? _dataDirectory : null
         };
 
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+        if (dialog.ShowDialog(UiTheme.DialogOwner(this)) != DialogResult.OK)
         {
             return null;
         }
@@ -611,7 +632,7 @@ public sealed class DayReportForm : Form
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            MessageBox.Show(this,
+            MessageBox.Show(UiTheme.DialogOwner(this),
                 $"The file could not be written: {ex.Message}",
                 "Save failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return null;

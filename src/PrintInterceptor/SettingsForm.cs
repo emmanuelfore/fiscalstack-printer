@@ -72,48 +72,52 @@ public sealed class SettingsForm : Form
         _secrets = secrets;
 
         Text = "PrintInterceptor settings";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = true;
         TopMost = true;
-        ClientSize = new Size(720, 600);
+        BackColor = UiTheme.Canvas;
+        Font = UiTheme.Ui(9f);
+        ClientSize = new Size(900, 700);
+        MinimumSize = new Size(780, 600);
 
         _apiEndpoint = new TextBox { Text = config.ApiEndpoint, Dock = DockStyle.Fill };
+        UiTheme.Input(_apiEndpoint);
+        UiTheme.Tip(_apiEndpoint, "The FiscalStack gateway URL, including the trailing slash.");
 
         // The box is prefilled with the stored key - masked, like any password
         // field - so reopening the window shows what is in use. Leaving it
         // unchanged keeps the key, typing a value replaces it, clearing it and
         // confirming removes the key, so the credential still never lands in
         // config.json.
-        _apiKey = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            UseSystemPasswordChar = true,
-            PlaceholderText = "no key configured"
-        };
-        _keyHint = new Label
-        {
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            Margin = new Padding(3, 2, 3, 0)
-        };
-        _clearKey = new Button { Text = "Remove stored key", AutoSize = true, Dock = DockStyle.Right };
+        _apiKey = new TextBox { Dock = DockStyle.Fill };
+        UiTheme.Password(_apiKey, "no key configured");
+        UiTheme.Tip(_apiKey, "The key is saved in Windows Credential Manager, never in config.json.");
+        _keyHint = UiTheme.Subheading("");
+        _keyHint.Margin = new Padding(2, 2, 2, 2);
+        _clearKey = new Button { Text = "Remove stored key", AutoSize = true };
+        UiTheme.Secondary(_clearKey);
         _clearKey.Click += RemoveStoredKey;
+        var showKey = new Button { Text = "Show", AutoSize = true };
+        UiTheme.Secondary(showKey);
+        showKey.Click += (_, _) =>
+        {
+            _apiKey.UseSystemPasswordChar = !_apiKey.UseSystemPasswordChar;
+            showKey.Text = _apiKey.UseSystemPasswordChar ? "Show" : "Hide";
+        };
+
         _printingEnabled = new CheckBox
         {
             Text = "Print the fiscal receipt automatically",
             Checked = config.Printing.Enabled,
             AutoSize = true
         };
+        UiTheme.Check(_printingEnabled);
 
-        _format = new ComboBox
-        {
-            Dock = DockStyle.Left,
-            Width = 230,
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
+        _format = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _format.Items.AddRange(new object[]
         {
             "Thermal receipt (58/80 mm)",
@@ -126,13 +130,9 @@ public sealed class SettingsForm : Form
             "auto" => 2,
             _ => 0
         };
+        UiTheme.Input(_format);
 
-        _template = new ComboBox
-        {
-            Dock = DockStyle.Left,
-            Width = 230,
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
+        _template = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
         _template.Items.AddRange(new object[]
         {
             "This app's fiscal layout",
@@ -140,6 +140,8 @@ public sealed class SettingsForm : Form
         });
         _template.SelectedIndex = string.Equals(
             config.Printing.Template.Trim(), "original", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        UiTheme.Input(_template);
+        UiTheme.Tip(_template, "The POS's own invoice keeps the original copy on file, so job retention is required.");
 
         _printerName = CreatePrinterSelector(
             config.Printing.PrinterName,
@@ -153,8 +155,9 @@ public sealed class SettingsForm : Form
             Maximum = 120,
             Value = Math.Clamp(config.Printing.PaperWidthMm, 40, 120),
             Dock = DockStyle.Left,
-            Width = 90
+            Width = 100
         };
+        UiTheme.Input(_paperWidth);
 
         _offlineEnabled = new CheckBox
         {
@@ -162,75 +165,91 @@ public sealed class SettingsForm : Form
             Checked = config.Offline.Enabled,
             AutoSize = true
         };
+        UiTheme.Check(_offlineEnabled);
 
         _refresh = new Button { Text = "Refresh from FiscalStack", AutoSize = true };
+        UiTheme.Secondary(_refresh);
         _refresh.Click += RefreshProvisioning;
 
         _status = new Label
         {
             AutoSize = false,
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
+            Height = 104,
             BorderStyle = BorderStyle.FixedSingle,
-            BackColor = Color.FromArgb(248, 250, 252),
-            ForeColor = Color.FromArgb(51, 65, 85),
-            Padding = new Padding(6),
+            BackColor = UiTheme.Canvas,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(8.5f),
+            Padding = new Padding(8, 6, 8, 6),
             Text = "Not provisioned yet. Enable offline signing and press Refresh."
         };
 
-        var statusHost = new Panel { Dock = DockStyle.Fill, Height = 96 };
-        statusHost.Controls.Add(_status);
-
         _offlineEnabled.CheckedChanged += (_, _) => _refresh.Enabled = _offlineEnabled.Checked;
 
-        var table = new TableLayoutPanel
+        var keyButtons = new FlowLayoutPanel
         {
-            Dock = DockStyle.Top,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
             AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 2,
-            Padding = new Padding(14, 14, 14, 4)
+            Margin = new Padding(0, 4, 0, 0)
         };
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
-        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        keyButtons.Controls.Add(_clearKey);
+        keyButtons.Controls.Add(showKey);
 
         var keyHost = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 2,
-            AutoSize = true
+            AutoSize = true,
+            ColumnCount = 1,
+            RowCount = 3
         };
-        keyHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        keyHost.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        keyHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         keyHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         keyHost.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         keyHost.Controls.Add(_apiKey, 0, 0);
-        keyHost.SetColumnSpan(_apiKey, 2);
-        keyHost.Controls.Add(_keyHint, 0, 1);
-        keyHost.Controls.Add(_clearKey, 1, 1);
+        keyHost.Controls.Add(keyButtons, 0, 1);
+        keyHost.Controls.Add(_keyHint, 0, 2);
 
-        AddRow(table, "API endpoint", _apiEndpoint);
-        AddRow(table, "API key", keyHost);
-        AddRow(table, "", Separator("Printing"));
-        AddRow(table, "", _printingEnabled);
-        AddRow(table, "Output format", _format);
-        AddRow(table, "Customer copy", _template);
-        AddRow(table, "Receipt printer (thermal)", _printerName);
-        AddRow(table, "A4 invoice printer", _a4PrinterName);
-        AddRow(table, "Paper width (mm)", _paperWidth);
-        AddRow(table, "", Separator("Offline fiscalisation"));
-        AddRow(table, "", _offlineEnabled);
-        AddRow(table, "", _refresh);
-        AddRow(table, "Provisioned state", statusHost);
+        var connection = Card("Connection", new[]
+        {
+            Row("API endpoint", _apiEndpoint),
+            Row("API key", keyHost)
+        }, "The API key stays in the Windows credential store. Show is only for checking what is registered on this till.");
+
+        var printing = Card("Printing", new[]
+        {
+            Row("", _printingEnabled),
+            Row("Output format", _format),
+            Row("Customer copy", _template),
+            Row("Receipt printer (thermal)", _printerName),
+            Row("A4 invoice printer", _a4PrinterName),
+            Row("Paper width (mm)", _paperWidth)
+        });
+
+        var provisioning = Card("Offline fiscalisation", new[]
+        {
+            Row("", _offlineEnabled),
+            Row("", _refresh),
+            Row("Provisioned state", _status)
+        }, "Offline signing needs a registered device and tax codes from FiscalStack before the first sale.");
+
+        var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(16, 12, 16, 12) };
+        content.Controls.Add(provisioning);
+        content.Controls.Add(printing);
+        content.Controls.Add(connection);
 
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(10)
+            BackColor = UiTheme.Surface,
+            Padding = new Padding(16)
         };
-        var save = new Button { Text = "Save", Width = 100, DialogResult = DialogResult.None };
-        _cancel = new Button { Text = "Cancel", Width = 100, DialogResult = DialogResult.Cancel };
+        var save = new Button { Text = "Save", MinimumSize = new Size(120, 36), DialogResult = DialogResult.None };
+        UiTheme.Primary(save);
+        _cancel = new Button { Text = "Cancel", MinimumSize = new Size(120, 36), DialogResult = DialogResult.Cancel };
+        UiTheme.Secondary(_cancel);
         _cancel.Click += (_, _) =>
         {
             if (EmbeddedMode)
@@ -242,14 +261,29 @@ public sealed class SettingsForm : Form
         buttons.Controls.Add(save);
         buttons.Controls.Add(_cancel);
 
-        var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        content.Controls.Add(table);
+        var header = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 66,
+            BackColor = UiTheme.Surface,
+            Padding = new Padding(18, 10, 18, 6)
+        };
+        var heading = UiTheme.Heading("Settings");
+        heading.Dock = DockStyle.Top;
+        var subheading = UiTheme.Subheading(
+            "Gateway, printing and offline provisioning for this till. Parse rules are edited on their own page.");
+        subheading.Dock = DockStyle.Top;
+        subheading.Padding = new Padding(0, 4, 0, 0);
+        header.Controls.Add(subheading);
+        header.Controls.Add(heading);
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        root.Controls.Add(content, 0, 0);
-        root.Controls.Add(buttons, 0, 1);
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        root.Controls.Add(header, 0, 0);
+        root.Controls.Add(content, 0, 1);
+        root.Controls.Add(buttons, 0, 2);
 
         AcceptButton = save;
         CancelButton = _cancel;
@@ -483,6 +517,8 @@ public sealed class SettingsForm : Form
             selector.Text = configured.Length > 0 ? configured : fallbackLabel;
         }
 
+        UiTheme.Input(selector);
+        UiTheme.Tip(selector, "Installed Windows printers. A configured name is kept if its printer is temporarily offline.");
         return selector;
     }
 
@@ -494,33 +530,57 @@ public sealed class SettingsForm : Form
         public override string ToString() => Label;
     }
 
-    private static Label Separator(string text) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-        Margin = new Padding(3, 12, 3, 3)
-    };
+    private static (string Label, Control Control) Row(string label, Control control) => (label, control);
 
-    private static void AddRow(TableLayoutPanel table, string label, Control control)
+    private static CardPanel Card(string title, (string Label, Control Control)[] rows, string? note = null)
     {
-        var row = table.RowCount++;
-        if (label.Length > 0)
+        var card = new CardPanel
         {
-            table.Controls.Add(new Label
-            {
-                Text = label,
-                AutoSize = true,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Anchor = AnchorStyles.Left
-            }, 0, row);
-        }
-        else
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 0, 0, 12)
+        };
+
+        var rowCount = rows.Length + (note is null ? 0 : 1);
+        var table = new TableLayoutPanel
         {
-            table.Controls.Add(new Label(), 0, row);
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = rowCount
+        };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var i = 0; i < rows.Length; i++)
+        {
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var label = UiTheme.SectionLabel(UiTheme.SafeText(rows[i].Label));
+            label.Margin = new Padding(0, 8, 10, 0);
+            label.Anchor = AnchorStyles.Left;
+            table.Controls.Add(label, 0, i);
+            rows[i].Control.Margin = new Padding(0, 4, 0, 4);
+            table.Controls.Add(rows[i].Control, 1, i);
         }
 
-        table.Controls.Add(control, 1, row);
+        if (note is not null)
+        {
+            var noteRow = rows.Length;
+            table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var noteLabel = UiTheme.Subheading(UiTheme.SafeText(note));
+            noteLabel.Margin = new Padding(0, 8, 0, 0);
+            table.SetColumnSpan(noteLabel, 2);
+            table.Controls.Add(noteLabel, 0, noteRow);
+        }
+
+        card.Controls.Add(table);
+        var caption = UiTheme.Heading(UiTheme.SafeText(title));
+        caption.Dock = DockStyle.Top;
+        caption.Font = UiTheme.Ui(11f, FontStyle.Bold);
+        caption.Margin = new Padding(0, 0, 0, 8);
+        card.Controls.Add(caption);
+        return card;
     }
 
     private void SaveSettings()

@@ -172,6 +172,87 @@ public sealed class JobLedgerTests : IDisposable
     }
 
     [Fact]
+    public void NeedsReviewKeepsCauseStageHintAndWarningsAcrossReload()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.RecordNeedsReview(
+            "hash-review",
+            "INV-1",
+            "20261123",
+            "A sale and a return cannot share one fiscal document.",
+            "job.json",
+            reviewStage: "Parse",
+            reviewHint: "Ask the POS to print the return as its own credit note.",
+            reviewWarnings: new[] { "Low column confidence (32%)" });
+
+        var entry = ledger.Get("hash-review");
+        Assert.NotNull(entry);
+        Assert.Equal("Parse", entry!.ReviewStage);
+        Assert.Equal("A sale and a return cannot share one fiscal document.", entry.Error);
+        Assert.Equal("Ask the POS to print the return as its own credit note.", entry.ReviewHint);
+        Assert.Equal(new[] { "Low column confidence (32%)" }, entry.ReviewWarnings);
+
+        var reloaded = new JobLedger(_directory, NullLog.Instance).Get("hash-review");
+        Assert.NotNull(reloaded);
+        Assert.Equal("Parse", reloaded!.ReviewStage);
+        Assert.Equal(new[] { "Low column confidence (32%)" }, reloaded.ReviewWarnings);
+    }
+
+    [Fact]
+    public void NeedsReviewWithoutAReasonStillTellsTheOperatorWhatHappened()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+
+        ledger.RecordNeedsReview("hash-blank", null, "20261123", "  ", null);
+
+        var entry = ledger.Get("hash-blank");
+        Assert.NotNull(entry);
+        Assert.True(entry!.Error!.Contains("no reason was recorded", StringComparison.OrdinalIgnoreCase));
+        Assert.True(entry.Error!.Contains("hash-blank", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void LegacyReviewFieldsStillExplainTheHold()
+    {
+        // Jobs captured before the stage/hint/warning fields existed only have Error.
+        var entry = new LedgerEntry
+        {
+            Hash = "hash-legacy",
+            Status = LedgerStatus.NeedsReview,
+            Error = "8 of 165 lines print a negative amount and the rest are positive."
+        };
+
+        Assert.Equal("Review", entry.ReviewStageText);
+        Assert.Equal(entry.Error, entry.ReviewReasonText);
+        Assert.Contains("return", entry.ReviewNextStepText, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("None recorded", entry.ReviewWarningsText);
+    }
+
+    [Fact]
+    public void ClaimingAReviewClearsItsStaleCause()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.RecordNeedsReview(
+            "hash-clear",
+            "INV-2",
+            "20261123",
+            "Rule did not read a total.",
+            null,
+            reviewStage: "Parse",
+            reviewHint: "Correct the rule.",
+            reviewWarnings: new[] { "warning" });
+
+        Assert.True(ledger.Claim("hash-clear", "INV-2", "20261123", null, 5m, "USD", "FiscalInvoice"));
+
+        var entry = ledger.Get("hash-clear");
+        Assert.NotNull(entry);
+        Assert.Null(entry!.Error);
+        Assert.Null(entry.ReviewStage);
+        Assert.Null(entry.ReviewHint);
+        Assert.Empty(entry.ReviewWarnings);
+    }
+
+    [Fact]
     public void AmbiguousFailureBlocksRetry()
     {
         var ledger = new JobLedger(_directory, NullLog.Instance);

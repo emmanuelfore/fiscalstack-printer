@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -19,6 +21,13 @@ public sealed class InterceptorConfig
     /// </summary>
     public string ApiKey { get; set; } = "";
     public int ApiTimeoutSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Set when an unreadable file was backed up and replaced with defaults so the
+    /// caller can log a visible warning. Never persisted.
+    /// </summary>
+    [JsonIgnore]
+    public string? RecoveryNote { get; private set; }
 
     /// <summary>
     /// Online fiscalisation is a network call in front of every print, so on a till
@@ -87,12 +96,44 @@ public sealed class InterceptorConfig
             return created;
         }
 
-        var json = File.ReadAllText(path);
-        var config = JsonSerializer.Deserialize<InterceptorConfig>(json, JsonOptions)
-                     ?? throw new InvalidOperationException($"Could not read configuration at {path}");
+        InterceptorConfig config;
+        try
+        {
+            var json = File.ReadAllText(path);
+            config = JsonSerializer.Deserialize<InterceptorConfig>(json, JsonOptions)
+                     ?? throw new JsonException("The configuration file was empty.");
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            // A truncated or zero-filled file must not brick the till. Keep the
+            // unreadable bytes for diagnosis, then continue with a clean config;
+            // the ledger and archived documents live in the data directory and
+            // are untouched by this recovery.
+            var backup = BackupUnreadableConfig(path);
+            var recovered = new InterceptorConfig { ConfigPath = path, SetupCompleted = false };
+            recovered.RecoveryNote =
+                $"Configuration at {path} could not be read ({ex.Message}). A copy was kept at {backup}; " +
+                "a fresh default configuration was written. Review Parse rules and Settings before the next sale.";
+            recovered.Save(path);
+            return recovered;
+        }
+
         config.ConfigPath = path;
         config.ApplyDefaults();
         return config;
+    }
+
+    private static string BackupUnreadableConfig(string path)
+    {
+        var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+        var backup = $"{path}.corrupt-{stamp}";
+        for (var i = 2; File.Exists(backup); i++)
+        {
+            backup = $"{path}.corrupt-{stamp}-{i}";
+        }
+
+        File.Copy(path, backup, overwrite: false);
+        return backup;
     }
 
     public string ResolveSecretDirectory()
@@ -326,8 +367,73 @@ public sealed class InterceptorConfig
         id.All(ch => char.IsAsciiLetterOrDigit(ch) || ch == '-') &&
         char.IsAsciiLetterOrDigit(id[0]);
 
+    private static void NormalizeNullStrings(object target, HashSet<object> visited)
+    {
+        if (!visited.Add(target))
+        {
+            return;
+        }
+
+        var type = target.GetType();
+        if (type.Namespace != typeof(InterceptorConfig).Namespace)
+        {
+            return;
+        }
+
+        var defaults = Activator.CreateInstance(type);
+        var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+        foreach (var property in properties)
+        {
+            if (property.PropertyType != typeof(string) || !property.CanWrite ||
+                property.GetIndexParameters().Length > 0 || property.Name == nameof(RecoveryNote))
+            {
+                continue;
+            }
+
+            if (property.GetValue(target) is null)
+            {
+                property.SetValue(target, property.GetValue(defaults) ?? "");
+            }
+        }
+
+        foreach (var property in properties)
+        {
+            if (!property.CanRead || !property.CanWrite || property.GetIndexParameters().Length > 0 ||
+                property.PropertyType == typeof(string))
+            {
+                continue;
+            }
+
+            var value = property.GetValue(target);
+            if (value is null)
+            {
+                continue;
+            }
+
+            if (value is IEnumerable items)
+            {
+                foreach (var item in items)
+                {
+                    if (item is not null)
+                    {
+                        NormalizeNullStrings(item, visited);
+                    }
+                }
+                continue;
+            }
+
+            NormalizeNullStrings(value, visited);
+        }
+    }
+
     private void ApplyDefaults()
     {
+        // The installer ensures keys exist so re-installs keep operator edits;
+        // that can leave explicit JSON nulls. Every non-nullable string below
+        // must still be a string before the UI binds it to a control.
+        NormalizeNullStrings(this, new HashSet<object>());
+
         Company ??= new CompanyConfig();
         Printing ??= new PrintingConfig();
         Parse ??= new ParseConfig();

@@ -34,9 +34,11 @@ public sealed class JobsForm : Form
     private readonly ComboBox _filter;
     private readonly TextBox _search;
     private readonly TextBox _details;
+    private readonly CardPanel _reviewNote;
     private readonly Button _reprint;
     private readonly Button _openJob;
     private readonly Button _savePdf;
+    private readonly Button _previewPdf;
     private readonly Button _closeButton;
     private readonly Label _count;
 
@@ -74,6 +76,7 @@ public sealed class JobsForm : Form
         _log = log;
 
         Text = "Fiscalisation jobs";
+        UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         MinimizeBox = false;
         ShowInTaskbar = true;
@@ -94,7 +97,7 @@ public sealed class JobsForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 174));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 206));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
 
         var header = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Surface, Padding = new Padding(20, 12, 20, 8) };
@@ -117,10 +120,17 @@ public sealed class JobsForm : Form
             "All jobs", "Needs review", "Rejected", "Unknown outcome", "Fiscalised", "Printing problems"
         });
         _filter.SelectedIndex = 0;
+        UiTheme.Input(_filter);
         _filter.SelectedIndexChanged += (_, _) => RefreshList();
 
-        _search = new TextBox { Width = 220, Font = UiTheme.Ui(9f) };
+        _search = new TextBox
+        {
+            Width = 240,
+            PlaceholderText = "Invoice, fiscal code, reason…"
+        };
+        UiTheme.Input(_search);
         _search.TextChanged += (_, _) => RefreshList();
+        UiTheme.Tip(_search, "Search invoice, fiscal code, verification code, reason, source file or job hash.");
 
         var refresh = new Button { Text = "Refresh", AutoSize = true };
         UiTheme.Secondary(refresh);
@@ -150,9 +160,22 @@ public sealed class JobsForm : Form
             AutoGenerateColumns = false
         };
         UiTheme.StyleGrid(_list);
+        _list.RowTemplate.Height = 44;
+        _list.CellToolTipTextNeeded += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0 || e.ColumnIndex >= _list.Columns.Count)
+            {
+                return;
+            }
+
+            e.ToolTipText = e.ColumnIndex == ColDetail
+                ? _list.Rows[e.RowIndex].Tag is LedgerEntry entry ? FullDetail(entry) : ""
+                : _list.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? "";
+        };
         BuildColumns();
+        _list.Columns[ColDetail].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
         _list.SelectionChanged += (_, _) => ShowSelection();
-        _list.CellDoubleClick += (_, _) => ShowSelectedDetails();
+        _list.CellDoubleClick += (_, _) => ShowSelectedDetails(preview: true);
         _list.CellClick += (_, e) => OnCellClick(e);
         _list.CellPainting += (_, e) => PaintCells(e);
 
@@ -174,7 +197,15 @@ public sealed class JobsForm : Form
             ForeColor = UiTheme.Text,
             Padding = new Padding(4, 6, 4, 4)
         };
+        UiTheme.Input(_details);
+        _details.BorderStyle = BorderStyle.None;
+        _details.Font = UiTheme.Mono(8.5f);
+        _reviewNote = UiTheme.Notice("Needs review", "", UiTheme.WarningBg, UiTheme.Warning);
+        _reviewNote.Dock = DockStyle.Top;
+        _reviewNote.Height = 104;
+        _reviewNote.Visible = false;
         detailCard.Controls.Add(_details);
+        detailCard.Controls.Add(_reviewNote);
         detailCard.Controls.Add(detailTitle);
 
         var actions = new FlowLayoutPanel
@@ -185,26 +216,51 @@ public sealed class JobsForm : Form
             Padding = new Padding(20, 10, 20, 8),
             WrapContents = false
         };
-        var close = new Button { Text = "Close", DialogResult = DialogResult.Cancel, Width = 88 };
-        UiTheme.Secondary(close);
+        Button Action(string text, bool primary = false)
+        {
+            var button = new Button
+            {
+                Text = text,
+                AutoSize = true,
+                MinimumSize = new Size(122, 36),
+                Margin = new Padding(6, 0, 6, 0)
+            };
+            if (primary)
+            {
+                UiTheme.Primary(button);
+            }
+            else
+            {
+                UiTheme.Secondary(button);
+            }
+
+            return button;
+        }
+
+        var close = Action("Close");
+        close.DialogResult = DialogResult.Cancel;
         close.Click += (_, _) => CloseRequested?.Invoke(this, EventArgs.Empty);
         _closeButton = close;
-        _reprint = new Button { Text = "Print fiscal copy", Width = 138, Enabled = false };
-        UiTheme.Primary(_reprint);
+        _reprint = Action("Print fiscal copy", primary: true);
+        _reprint.Enabled = false;
         _reprint.Click += (_, _) => ReprintSelected();
-        _savePdf = new Button { Text = "Save PDF copy", Width = 126, Enabled = false };
-        UiTheme.Secondary(_savePdf);
+        _savePdf = Action("Save PDF copy");
+        _savePdf.Enabled = false;
         _savePdf.Click += (_, _) => SavePdfSelected();
-        _openJob = new Button { Text = "Open source", Width = 110, Enabled = false };
-        UiTheme.Secondary(_openJob);
+        _previewPdf = Action("Preview PDF");
+        _previewPdf.Enabled = false;
+        _previewPdf.Click += (_, _) => ShowSelectedDetails(preview: true);
+        _openJob = Action("Open source");
+        _openJob.Enabled = false;
         _openJob.Click += (_, _) => OpenSourceJob();
-        var detailsButton = new Button { Text = "Full detail", Width = 100 };
-        UiTheme.Ghost(detailsButton);
+        var detailsButton = Action("Full detail");
+
         detailsButton.Click += (_, _) => ShowSelectedDetails();
 
         actions.Controls.Add(close);
         actions.Controls.Add(_reprint);
         actions.Controls.Add(_savePdf);
+        actions.Controls.Add(_previewPdf);
         actions.Controls.Add(_openJob);
         actions.Controls.Add(detailsButton);
 
@@ -259,7 +315,8 @@ public sealed class JobsForm : Form
         {
             HeaderText = "",
             Text = text,
-            Width = 64,
+            Width = 88,
+            MinimumWidth = 88,
             SortMode = DataGridViewColumnSortMode.NotSortable
         };
         UiTheme.ButtonColumn(column, fore, back);
@@ -342,7 +399,7 @@ public sealed class JobsForm : Form
         return new[]
         {
             entry.InvoiceNumber, entry.FiscalCode, entry.VerificationCode, entry.Error,
-            entry.PrintError, entry.SourceFile, entry.Hash
+            entry.ReviewStage, entry.ReviewHint, entry.PrintError, entry.SourceFile, entry.Hash
         }.Any(value => value is not null &&
                        value.Contains(query, StringComparison.OrdinalIgnoreCase));
     }
@@ -414,7 +471,8 @@ public sealed class JobsForm : Form
     {
         if (!string.IsNullOrWhiteSpace(entry.Error))
         {
-            return entry.Error!;
+            var stage = string.IsNullOrWhiteSpace(entry.ReviewStage) ? "" : entry.ReviewStage + ": ";
+            return stage + entry.Error;
         }
 
         if (!string.IsNullOrWhiteSpace(entry.PrintError))
@@ -427,6 +485,28 @@ public sealed class JobsForm : Form
             : "";
     }
 
+    /// <summary>Full reason and next step, used by cell tooltips so nothing is lost to a narrow grid.</summary>
+    private static string FullDetail(LedgerEntry entry)
+    {
+        var lines = new List<string>();
+        if (!string.IsNullOrWhiteSpace(entry.Error))
+        {
+            lines.Add(entry.Error!);
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.ReviewHint))
+        {
+            lines.Add("Next step: " + entry.ReviewHint);
+        }
+
+        if (entry.ReviewWarnings.Length > 0)
+        {
+            lines.AddRange(entry.ReviewWarnings.Select(warning => "Warning: " + warning));
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
     private LedgerEntry? SelectedEntry() =>
         _list.CurrentRow is { } row && row.Tag is LedgerEntry entry ? entry : null;
 
@@ -437,22 +517,43 @@ public sealed class JobsForm : Form
                         entry.Status is LedgerStatus.Fiscalised or LedgerStatus.FiscalisedOffline;
         _reprint.Enabled = printable && entry is not null && _snapshots.ExistsDurable(entry.Hash);
         _savePdf.Enabled = entry is not null && FiscalDocumentActions.CanSavePdf(entry, _snapshots);
+        _previewPdf.Enabled = _savePdf.Enabled;
         _openJob.Enabled = entry is not null && FiscalDocumentActions.CanOpen(entry, _snapshots, _jobs);
         _details.Text = entry is null ? "" : Describe(entry);
+        ShowReviewNote(entry);
     }
 
-    private void ShowSelectedDetails()
+    private void ShowReviewNote(LedgerEntry? entry)
+    {
+        if (entry?.Status != LedgerStatus.NeedsReview)
+        {
+            _reviewNote.Visible = false;
+            return;
+        }
+
+        var text = (Label)_reviewNote.Tag!;
+        text.Text = UiTheme.SafeText(string.Join(Environment.NewLine,
+            $"Stage: {entry.ReviewStageText}",
+            $"Cause: {entry.ReviewReasonText}",
+            $"Next step: {entry.ReviewNextStepText}",
+            $"Warnings: {entry.ReviewWarningsText}"));
+        _reviewNote.Visible = true;
+    }
+
+    private void ShowSelectedDetails(bool preview = false)
     {
         if (SelectedEntry() is { } entry)
         {
-            using var detail = new JobDetailForm(entry, _jobs, _snapshots);
-            detail.ShowDialog(this);
+            using var detail = new JobDetailForm(entry, _jobs, _snapshots, _log, preview);
+            detail.ShowDialog(UiTheme.DialogOwner(this));
+            RefreshList();
         }
     }
 
     private string Describe(LedgerEntry entry)
     {
         var copy = _snapshots.ExistsDurable(entry.Hash) ? "archived" : "no";
+        var held = entry.Status == LedgerStatus.NeedsReview;
         return string.Join(Environment.NewLine, new[]
         {
             $"Hash............ {entry.Hash}",
@@ -479,7 +580,10 @@ public sealed class JobsForm : Form
             $"Reconcile passes... {entry.ReconcileAttempts}",
             $"Last reconcile... {(entry.LastReconcileAt is { } reconcileAt ? reconcileAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") : "-")}",
             $"Print error..... {OrDash(entry.PrintError)}",
-            $"Reason.......... {OrDash(entry.Error)}",
+            $"Review stage.... {(held ? entry.ReviewStageText : OrDash(entry.ReviewStage))}",
+            $"Reason.......... {(held ? entry.ReviewReasonText : OrDash(entry.Error))}",
+            $"Next step....... {(held ? entry.ReviewNextStepText : OrDash(entry.ReviewHint))}",
+            $"Warnings........ {(held ? entry.ReviewWarningsText : (entry.ReviewWarnings.Length == 0 ? "-" : string.Join(" | ", entry.ReviewWarnings)))}",
             $"Source job...... {OrDash(entry.SourceFile)}",
             $"Fiscal copy..... {copy}"
         });
@@ -495,11 +599,11 @@ public sealed class JobsForm : Form
 
         if (!FiscalDocumentActions.TrySavePdf(entry, _snapshots, _log, out var path, out var error))
         {
-            MessageBox.Show(this, error, "Could not save the PDF copy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(UiTheme.DialogOwner(this), error, "Could not save the PDF copy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        MessageBox.Show(this,
+        MessageBox.Show(UiTheme.DialogOwner(this),
             $"Saved the fiscal copy to:{Environment.NewLine}{path}",
             "PDF copy saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
@@ -512,7 +616,7 @@ public sealed class JobsForm : Form
             return;
         }
 
-        var answer = MessageBox.Show(this,
+        var answer = MessageBox.Show(UiTheme.DialogOwner(this),
             $"Print the fiscal copy for {entry.InvoiceNumber ?? "this invoice"}?" +
             Environment.NewLine + Environment.NewLine +
             "The copy is marked REPRINT. The receipt is not fiscalised again.",
@@ -530,18 +634,18 @@ public sealed class JobsForm : Form
         {
             if (_pipeline.TryReprint(entry.Hash, out var error))
             {
-                MessageBox.Show(this, "The fiscal copy was sent to the printer.", "Print fiscal copy",
+                MessageBox.Show(UiTheme.DialogOwner(this), "The fiscal copy was sent to the printer.", "Print fiscal copy",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                MessageBox.Show(this, error, "Could not print the copy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(UiTheme.DialogOwner(this), error, "Could not print the copy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         catch (Exception ex)
         {
             _log.Error("Printing from the jobs window failed", ex);
-            MessageBox.Show(this, ex.Message, "Could not print the copy", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not print the copy", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         RefreshList();

@@ -393,9 +393,27 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (_needsReview >= 0 && count > _needsReview)
         {
+            LedgerEntry? latest = null;
+            try
+            {
+                latest = _ledger.All()
+                    .Where(entry => entry.Status == LedgerStatus.NeedsReview)
+                    .OrderByDescending(entry => entry.UpdatedAt)
+                    .FirstOrDefault();
+            }
+            catch (Exception ex)
+            {
+                _log.Warn($"Could not read the latest held receipt: {ex.Message}");
+            }
+
+            var reason = latest is null
+                ? "Open Fiscalisation jobs for the recorded reason."
+                : $"{(string.IsNullOrWhiteSpace(latest.ReviewStage) ? "Review" : latest.ReviewStage)}: " +
+                  (string.IsNullOrWhiteSpace(latest.Error) ? "cause not recorded" : latest.Error) +
+                  (string.IsNullOrWhiteSpace(latest.ReviewHint) ? "" : " Next: " + latest.ReviewHint);
             Balloon(
                 "Receipt held for review",
-                $"{count - _needsReview} new receipt(s) were not fiscalised. Open Fiscalisation jobs to review and reprint.",
+                $"{count - _needsReview} new receipt(s) were not fiscalised. {reason}",
                 ToolTipIcon.Warning);
         }
 
@@ -1232,7 +1250,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         var assembly = Assembly.GetExecutingAssembly();
         var resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(name => name.EndsWith(
-                "tray-base.png", StringComparison.OrdinalIgnoreCase));
+                "app-icon.ico", StringComparison.OrdinalIgnoreCase));
         if (resourceName is null)
         {
             return null;
@@ -1244,8 +1262,8 @@ public sealed class TrayApplicationContext : ApplicationContext
             return null;
         }
 
-        using var decoded = new Bitmap(resource);
-        return new Bitmap(decoded);
+        using var icon = new Icon(resource);
+        return (Bitmap)icon.ToBitmap().Clone();
     }
 
     [DllImport("user32.dll", SetLastError = true)]

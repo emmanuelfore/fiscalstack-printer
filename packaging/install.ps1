@@ -128,12 +128,27 @@ function Set-RestrictedAcl([string]$path, [string]$user) {
 
 function Read-ConfigFile([string]$path) {
     if (-not (Test-Path $path)) { return $null }
-    return Get-Content -Path $path -Raw | ConvertFrom-Json
+    try {
+        $raw = Get-Content -Path $path -Raw -ErrorAction Stop
+        return $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        # A torn or zero-filled config must not stop a re-install. Keep it for
+        # diagnosis and let the caller write the default values it was given.
+        $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
+        $backup = "$path.corrupt-$stamp"
+        for ($i = 2; Test-Path -LiteralPath $backup; $i++) {
+            $backup = "$path.corrupt-$stamp-$i"
+        }
+        Copy-Item -LiteralPath $path -Destination $backup -ErrorAction Stop
+        Write-Warning "Configuration at $path could not be read. A copy was saved to $backup; setup will write a fresh default config."
+        return $null
+    }
 }
 
-function Ensure-Property($object, [string]$name) {
+function Ensure-Property($object, [string]$name, $default = "") {
     if ($null -eq $object.PSObject.Properties[$name]) {
-        $object | Add-Member -NotePropertyName $name -NotePropertyValue $null
+        $object | Add-Member -NotePropertyName $name -NotePropertyValue $default
     }
 }
 
@@ -143,8 +158,19 @@ function Write-ConfigFile([string]$path, $config) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
 
+    # Write beside the target and move it into place so a cancelled install can
+    # never leave config.json torn or zero-filled.
     $json = $config | ConvertTo-Json -Depth 12
-    Set-Content -Path $path -Value $json -Encoding UTF8
+    $temp = Join-Path $directory (".config.json." + [Guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        [System.IO.File]::WriteAllText($temp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temp -Destination $path -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) {
+            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Stop-And-RemoveService([string]$name) {
@@ -307,12 +333,21 @@ Ensure-Property $config "listenPort"
 Ensure-Property $config "apiEndpoint"
 Ensure-Property $config "apiKey"
 Ensure-Property $config "ghostscriptPath"
-Ensure-Property $config "printing"
+Ensure-Property $config "printing" $null
 if ($null -eq $config.printing) {
     $config.printing = [pscustomobject]@{}
 }
 Ensure-Property $config.printing "printerName"
 Ensure-Property $config.printing "a4PrinterName"
+
+# An existing config may already have explicit nulls from an earlier setup.
+# The app normalises them on load, but do not keep writing them either.
+foreach ($name in @("apiEndpoint", "apiKey", "ghostscriptPath")) {
+    if ($null -eq $config.$name) { $config.$name = "" }
+}
+foreach ($name in @("printerName", "a4PrinterName")) {
+    if ($null -eq $config.printing.$name) { $config.printing.$name = "" }
+}
 
 # build-release.ps1 bundles Ghostscript into the release by default, so a till installed
 # from that package already has {app}\ghostscript. An explicit -GhostscriptPath always

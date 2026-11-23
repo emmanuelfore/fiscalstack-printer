@@ -13,10 +13,13 @@
     <AssemblyName>PrintInterceptor</AssemblyName>
     <RootNamespace>PrintInterceptor</RootNamespace>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationIcon>Resources\app-icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Resources\tray-base.png" />
+    <EmbeddedResource Include="Resources\app-icon.ico" />
+    <EmbeddedResource Include="Resources\logo.png" />
   </ItemGroup>
 
   <ItemGroup>
