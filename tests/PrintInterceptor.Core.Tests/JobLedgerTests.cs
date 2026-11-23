@@ -92,6 +92,28 @@ public sealed class JobLedgerTests : IDisposable
     }
 
     [Fact]
+    public void SpacingAndCaseVariantsOfTheSameInvoiceAreBlocked()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+
+        Assert.True(ledger.Claim("hash-1", "IN-000000027", "20261029", null, 10m, "USD", "FiscalInvoice"));
+        ledger.MarkFiscalised("hash-1", new FiscalizeResponse
+        {
+            Success = true,
+            FiscalCode = "CODE-27",
+            Receipt = new FiscalReceipt { InvoiceNo = "IN-000000027" }
+        });
+
+        // A driver re-render can change the spacing and case around the number.
+        Assert.False(ledger.Claim("hash-2", "IN 000000027", "20261029", null, 10m, "USD", "FiscalInvoice"));
+        Assert.False(ledger.Claim("hash-3", "in-000000027", "20261029", null, 10m, "USD", "FiscalInvoice"));
+        Assert.Equal("hash-1", ledger.FindBlockingByInvoice("IN 000000027", "20261029", "FiscalInvoice")?.Hash);
+
+        // A genuinely different number is still a different sale.
+        Assert.True(ledger.Claim("hash-4", "IN-000000028", "20261029", null, 10m, "USD", "FiscalInvoice"));
+    }
+
+    [Fact]
     public void AReturnOnTheOriginalsNumberIsNotSuppressedAsADuplicateSale()
     {
         var ledger = new JobLedger(_directory, NullLog.Instance);

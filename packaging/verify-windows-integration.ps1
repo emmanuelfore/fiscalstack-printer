@@ -18,6 +18,7 @@ param(
     [string]$Thumbprint = "",
     [string]$TimestampUrl = "",
     [string]$ServiceName = "PrintInterceptor",
+    [string]$PrinterName = "FiscalStack Fiscal Printer",
     [switch]$SkipSigning,
     [switch]$PurgeOnCleanup,
     [switch]$KeepArtifacts
@@ -156,9 +157,13 @@ try {
 
     Write-Step "Running the silent installer"
     $setupLog = Join-Path $env:TEMP "printinterceptor-setup-integration.log"
-    $temporaryFiles += $setupLog
+    # Keep the setup log across runs: an installer failure is only debuggable if
+    # cleanup has not already deleted the evidence.
     if (Test-Path $setupLog) { Remove-Item $setupLog -Force }
-    $arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=`"ghostscript`" /LOG=`"$setupLog`""
+    # The printer task matters here: with Ghostscript selected Setup must install the
+    # PS class driver, otherwise a directly printed A4 invoice arrives as fragmented
+    # text and the Palladium profile cannot parse it.
+    $arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=`"printer,ghostscript`" /LOG=`"$setupLog`""
     $installer = Start-Process -FilePath $setupPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
     if ($installer.ExitCode -ne 0) {
         throw "Silent installer exited with $($installer.ExitCode). Setup log: $setupLog"
@@ -177,6 +182,18 @@ try {
         throw "install.ps1 did not complete:$([Environment]::NewLine)$installStatus$([Environment]::NewLine)Setup log: $setupLog"
     }
     Write-Host "Install configuration completed ($($installStatus.Trim()))."
+
+    Write-Step "Verifying the PostScript virtual printer"
+    $printer = Get-Printer -Name $PrinterName -ErrorAction SilentlyContinue
+    if ($null -eq $printer) { throw "Printer '$PrinterName' was not installed." }
+    if ($printer.DriverName -ne "Microsoft PS Class Driver") {
+        throw "Printer '$PrinterName' uses '$($printer.DriverName)', not 'Microsoft PS Class Driver'. " +
+              "Direct A4 prints would be captured as fragmented text."
+    }
+    if ($installStatus -notmatch "(?m)^printer=installed\r?$") {
+        throw "install.ps1 did not report printer=installed:$([Environment]::NewLine)$installStatus"
+    }
+    Write-Host "Virtual printer '$PrinterName' uses the PostScript class driver."
 
     Write-Step "Verifying the Windows service and capture listener"
     $deadline = (Get-Date).AddSeconds(60)
@@ -253,7 +270,7 @@ try {
 finally {
     Write-Step "Cleaning up test state"
     Remove-TestService $ServiceName
-    $uninstallParameters = @{ Uninstall = $true; ServiceName = $ServiceName; SkipPrinter = $true }
+    $uninstallParameters = @{ Uninstall = $true; ServiceName = $ServiceName; PrinterName = $PrinterName }
     if ($PurgeOnCleanup) { $uninstallParameters["Purge"] = $true }
     try { & $installScript @uninstallParameters -ErrorAction SilentlyContinue | Out-Null }
     catch { }

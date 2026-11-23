@@ -70,8 +70,10 @@ if ($Remove) {
         Write-Host "Removed printer '$PrinterName'."
     }
 
-    $port = Get-PrinterPort -Name $portName -ErrorAction SilentlyContinue
-    if ($port) {
+    # $port would collide with the [int]$Port parameter (PowerShell variables are
+    # case-insensitive), so a CIM object assigned here fails an Int32 conversion.
+    $printerPort = Get-PrinterPort -Name $portName -ErrorAction SilentlyContinue
+    if ($printerPort) {
         Remove-PrinterPort -Name $portName
         Write-Host "Removed port '$portName'."
     }

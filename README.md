@@ -391,13 +391,19 @@ so choose one mode per till.
   sync; red = API unreachable, status unknown, or the sync queue is paused. The tooltip shows
   the API state, fiscal day, queued receipts and any receipts held for review.
 - **Menu:** live API status, fiscal day number/state, *Open fiscal day…* / *Close fiscal day…*
-  (enabled from the live state), queue size, receipts needing review, *Resume offline sync*
-  (only while paused), *Sync offline receipts now*, *Reconcile unknown receipts now*,
+  (enabled from the live state; the close item reads *Retry close fiscal day…* after a failed
+  close), queue size, receipts needing review, *Resume offline sync*
+  (only while paused), *Dashboard…*, *Sync offline receipts now*, *Reconcile unknown receipts now*,
   *Fiscal status…*, *Fiscalisation jobs…*, *Daily Z-shift summary…*,
-  *Test connection*, *Settings…*, open the config / logs / data / parse-profile folders,
-  *Import receipt parse profile…*, *Capture receipt layout from a job…*, *Start with Windows*,
-  *Exit*. Day open/close asks for confirmation and reports the gateway's answer; the device state
-  is polled every 30 seconds.
+  *Test connection*, *Settings…*, open the config / logs / current log file / data / parse-profile
+  folders, *Import receipt parse profile…*, *Capture receipt layout from a job…*,
+  *Start with Windows*, *Exit*. Double-clicking the icon opens the Dashboard. Day open/close asks
+  for confirmation and reports the gateway's answer; the device state is polled every 30 seconds.
+- **Dashboard** (double-click the icon or *Dashboard…*): today's KPIs (receipts fiscalised,
+  queued/retrying, needing review, totals by currency), an hourly activity chart, the latest jobs
+  with a status filter, and the fiscal-day card with a live elapsed timer and close-day checks
+  (FDMS reachable, queue empty, nothing needing review). It reads the local ledger, so it works
+  offline; only the device card needs FiscalStack.
 - **Notifications** (balloons on transition, not repeatedly): a fiscal day close failed, the
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
@@ -829,7 +835,9 @@ Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately
    **invoice number + business date + document type** was already fiscalised. POS invoice
    numbers reset daily, so the date is part of the key, and a credit note that reuses the
    original's number is a different document rather than a second print. An entry written
-   before the distinction existed blocks every type.
+   before the distinction existed blocks every type. The invoice number is matched on its
+   letters and digits only, so a driver re-render that changes spacing, case or punctuation
+   (`IN-000000027` vs `IN 000000027`) is still recognised as the same document.
 3. `InFlight`, `Fiscalised`, `FiscalisedOffline` and `AmbiguousFailure` entries block
    re-fiscalisation. `Rejected` and `NeedsReview` do not.
 4. A receipt signed offline is also blocked by its queue file: it stays claimed until the

@@ -43,6 +43,22 @@ public sealed class JobStoreTests : IDisposable
     }
 
     [Fact]
+    public void SavesThePdfConvertedFromAPostScriptJob()
+    {
+        var store = CreateStore();
+        var raw = "%!PS-Adobe-3.0\ninvoice"u8.ToArray();
+        var pdf = "%PDF-1.4\nconverted"u8.ToArray();
+        var decoded = new DecodedJob(true, JobFormat.PostScript, "decoded invoice", null, null, pdf);
+
+        var textPath = store.Save("ps-hash", decoded, raw);
+        var directory = Path.GetDirectoryName(textPath!)!;
+
+        Assert.True(File.Exists(Path.Combine(directory, "ps-hash.ps")));
+        Assert.Equal(pdf, File.ReadAllBytes(Path.Combine(directory, "ps-hash.pdf")));
+        Assert.Equal(JobFormat.Pdf, store.RetainedFormat(textPath));
+    }
+
+    [Fact]
     public void KeepsTheOriginalFileWhenDecodingFails()
     {
         var store = CreateStore();

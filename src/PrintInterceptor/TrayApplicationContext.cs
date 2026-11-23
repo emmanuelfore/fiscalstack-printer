@@ -119,6 +119,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_failuresItem);
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Dashboard…", null, (_, _) => ShowDashboard()));
         menu.Items.Add(new ToolStripMenuItem("Sync offline receipts now", null, SyncNow));
         menu.Items.Add(new ToolStripMenuItem("Reconcile unknown receipts now", null, ReconcileNow));
         menu.Items.Add(new ToolStripMenuItem("Fiscal status…", null, (_, _) => ShowFiscalStatus()));
@@ -131,6 +132,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("Open received files folder", null, OpenReceivedFiles));
         menu.Items.Add(new ToolStripMenuItem("Open fiscalised invoices folder", null, OpenFiscalisedInvoices));
         menu.Items.Add(new ToolStripMenuItem("Open logs folder", null, OpenLogs));
+        menu.Items.Add(new ToolStripMenuItem("Open current log file", null, OpenCurrentLogFile));
         menu.Items.Add(new ToolStripMenuItem("Open data folder", null, OpenData));
         menu.Items.Add(new ToolStripMenuItem("Import receipt parse profile…", null, ImportParseProfile));
         menu.Items.Add(new ToolStripMenuItem("Capture receipt layout from a job…", null, (_, _) => ShowCapture()));
@@ -151,7 +153,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu
         };
-        _notifyIcon.DoubleClick += (_, _) => ShowSettings();
+        _notifyIcon.DoubleClick += (_, _) => ShowDashboard();
         menu.Opening += (_, _) => _autostartItem.Checked = IsAutostartEnabled();
 
         _timer = new System.Windows.Forms.Timer { Interval = 300 };
@@ -345,6 +347,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             : $"Fiscal day: {state}";
         _openDayItem.Enabled = !status.IsDayOpen;
         _closeDayItem.Enabled = status.IsDayOpen;
+        _closeDayItem.Text = status.IsClosePending ? "Retry close fiscal day…" : "Close fiscal day…";
 
         NotifyCloseFailure(status);
     }
@@ -772,6 +775,37 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _deviceStatusAt = DateTimeOffset.MinValue;
         _ = RefreshAsync(forceDevice: false);
+    }
+
+    /// <summary>
+    /// The one-page operator view copied from FiscalBridge: today's KPIs, hourly activity, recent
+    /// jobs and the fiscal-day/close-check panel. It reads the same ledger the pipeline writes.
+    /// </summary>
+    private void ShowDashboard()
+    {
+        using var form = new DashboardForm(_config, _client, _company, _ledger, _sync, _snapshots, _pipeline, _log);
+        form.ShowDialog();
+        _deviceStatusAt = DateTimeOffset.MinValue;
+        _ = RefreshAsync(forceDevice: true);
+    }
+
+    private void OpenCurrentLogFile(object? sender, EventArgs e)
+    {
+        var logs = Path.Combine(_config.ResolveDataDirectory(), "logs");
+        Directory.CreateDirectory(logs);
+        var newest = Directory.GetFiles(logs, "printinterceptor-*.log")
+            .Select(path => new FileInfo(path))
+            .OrderByDescending(file => file.LastWriteTimeUtc)
+            .FirstOrDefault();
+
+        if (newest is null)
+        {
+            MessageBox.Show("No log file has been written yet.", "PrintInterceptor",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        ShellOpen.Path(newest.FullName);
     }
 
     private void ShowSettings()

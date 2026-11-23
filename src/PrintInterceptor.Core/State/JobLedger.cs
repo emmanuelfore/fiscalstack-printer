@@ -352,7 +352,7 @@ public sealed class JobLedger
         lock (_gate)
         {
             return _document.Entries.Values
-                .Where(entry => string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => SameInvoiceNumber(entry.InvoiceNumber, invoiceNumber))
                 .Where(entry => entry.BusinessDate == businessDate)
                 .Where(entry => SameDocumentKind(entry, transactionType))
                 .OrderByDescending(entry => entry.UpdatedAt)
@@ -378,7 +378,7 @@ public sealed class JobLedger
         {
             return _document.Entries.Values
                 .Where(entry => IsBlocking(entry.Status))
-                .Where(entry => string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase))
+                .Where(entry => SameInvoiceNumber(entry.InvoiceNumber, invoiceNumber))
                 .Where(entry => entry.BusinessDate == businessDate)
                 .Where(entry => SameDocumentKind(entry, transactionType))
                 .OrderByDescending(entry => entry.UpdatedAt)
@@ -683,9 +683,36 @@ public sealed class JobLedger
         return _document.Entries.Values
             .Where(entry => IsBlocking(entry.Status))
             .FirstOrDefault(entry =>
-                string.Equals(entry.InvoiceNumber, invoiceNumber, StringComparison.OrdinalIgnoreCase) &&
+                SameInvoiceNumber(entry.InvoiceNumber, invoiceNumber) &&
                 entry.BusinessDate == businessDate &&
                 SameDocumentKind(entry, transactionType));
+    }
+
+    /// <summary>
+    /// A driver re-render can put spaces or different punctuation around the same number
+    /// ("IN-000000027" vs "IN 000000027"). Identity is the letters and digits, not the
+    /// spacing, so the second print is recognised as the same document.
+    /// </summary>
+    private static bool SameInvoiceNumber(string? left, string? right) =>
+        NormalizeInvoiceNumber(left) == NormalizeInvoiceNumber(right);
+
+    private static string NormalizeInvoiceNumber(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "";
+        }
+
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(char.ToUpperInvariant(character));
+            }
+        }
+
+        return builder.ToString();
     }
 
     private static bool SameDocumentKind(LedgerEntry entry, string? transactionType) =>

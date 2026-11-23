@@ -8,12 +8,14 @@ namespace PrintInterceptor.Core.Decoding;
 public sealed class JobDecoder
 {
     private readonly GhostscriptTextExtractor _ghostscript;
+    private readonly GhostscriptPdfWriter _pdfWriter;
     private readonly ILog _log;
 
     public JobDecoder(InterceptorConfig config, ILog log)
     {
         _log = log;
         _ghostscript = new GhostscriptTextExtractor(config, log);
+        _pdfWriter = new GhostscriptPdfWriter(config, log);
     }
 
     public async Task<DecodedJob> DecodeAsync(byte[] data, CancellationToken cancellationToken)
@@ -36,8 +38,25 @@ public sealed class JobDecoder
                 return DecodedJob.Failure(format, "The print job contained no extractable text.");
             }
 
+            // A PDF job is already the file to keep. A PostScript job is converted so the
+            // archive holds the invoice as Palladium printed it, not just decoded text.
+            // A failed conversion is not fatal: fiscalisation only needs the text.
+            byte[]? pdf = null;
+            if (format == JobFormat.PostScript)
+            {
+                var converted = await _pdfWriter.ConvertAsync(data, cancellationToken);
+                if (converted.Success)
+                {
+                    pdf = converted.Pdf;
+                }
+                else
+                {
+                    _log.Warn($"Could not convert the PostScript print job to PDF: {converted.Error}");
+                }
+            }
+
             var title = format == JobFormat.PostScript ? ExtractPostScriptTitle(data) : null;
-            return new DecodedJob(true, format, text, title, null);
+            return new DecodedJob(true, format, text, title, null, pdf);
         }
 
         var decoded = TextSanitizer.Sanitize(TextSanitizer.Decode(data));

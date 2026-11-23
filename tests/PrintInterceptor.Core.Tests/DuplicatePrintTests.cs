@@ -89,6 +89,24 @@ public sealed class DuplicatePrintTests : IDisposable
     }
 
     [Fact]
+    public async Task AnInvoiceNumberReRenderedWithSpacesIsStillTheOneDocument()
+    {
+        // The second print writes the same number with different spacing. The accountant's
+        // identity is the letters and digits, so this must not become a second sale.
+        var rig = Harness(FiscalisedEveryTime);
+
+        await rig.SendAsync(Sale(invoiceNumber: "INV-1001"));
+        await rig.SendAsync(Sale(invoiceNumber: "INV 1001"));
+
+        Assert.Single(rig.Posts);
+        Assert.Equal(2, rig.Printer.Models.Count);
+        Assert.True(rig.Printer.Models[1].IsReprint);
+
+        var entry = Assert.Single(rig.Ledger.All());
+        Assert.Equal(1, entry.DuplicateAttemptCount);
+    }
+
+    [Fact]
     public async Task ASecondCopyOfAnUnsettledJobIsNotedAndNothingIsSentOrPrinted()
     {
         // A 5xx leaves the receipt possibly already in ZIMRA. Pressing Print again must not add a

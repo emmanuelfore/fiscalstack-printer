@@ -95,7 +95,13 @@ begin
 
 #ifdef GhostscriptBundled
   if WizardIsTaskSelected('ghostscript') then
+  begin
     Args := Args + ' -GhostscriptPath "' + ExpandConstant('{app}\ghostscript\bin\gswin64c.exe') + '"';
+    // The PS class driver sends Palladium's A4 invoice as PostScript. Text-mode
+    // capture fragments those glyphs into unparseable lines; PostScript goes through
+    // Ghostscript txtwrite and is also archived as a PDF.
+    Args := Args + ' -PrinterMode PostScript';
+  end;
 #endif
 
   Result := Args;

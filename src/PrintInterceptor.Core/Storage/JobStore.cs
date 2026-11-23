@@ -42,6 +42,17 @@ public sealed class JobStore
                 File.WriteAllText(textPath, decoded.Text, new UTF8Encoding(false));
             }
 
+            // A converted PostScript job carries its PDF here; keep it beside the
+            // decoded text so the original invoice can be opened and stamped.
+            if (decoded.Pdf is not null && decoded.Format != JobFormat.Pdf)
+            {
+                var pdfPath = Path.Combine(directory, hash + ".pdf");
+                if (!File.Exists(pdfPath))
+                {
+                    File.WriteAllBytes(pdfPath, decoded.Pdf);
+                }
+            }
+
             if (decoded.Format != JobFormat.Text)
             {
                 var extension = decoded.Format == JobFormat.Pdf ? ".pdf" : ".ps";

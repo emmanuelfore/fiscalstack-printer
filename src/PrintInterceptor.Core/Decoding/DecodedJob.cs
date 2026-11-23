@@ -12,7 +12,8 @@ public sealed record DecodedJob(
     JobFormat Format,
     string Text,
     string? JobTitle,
-    string? Error)
+    string? Error,
+    byte[]? Pdf = null)
 {
     public static DecodedJob Failure(JobFormat format, string error) =>
         new(false, format, string.Empty, null, error);

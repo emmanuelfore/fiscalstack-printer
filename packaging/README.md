@@ -170,6 +170,25 @@ licence from Artifex.
 The two routes that avoid the question are `-NoGhostscript` with Ghostscript installed on
 the till, and the `Generic / Text Only` capture path, which needs no Ghostscript at all.
 
+### Direct printing from Palladium (A4 invoices)
+
+Palladium's *direct* print is laid out with individually positioned glyphs. A
+`Generic / Text Only` driver flattens that into fragments such as `NumberIN`, `-`,
+`000000083`, `:` on separate lines, and the parser cannot recover the item columns from
+it. The in-box PDF files parse cleanly because they carry a text layer, so an A4 POS must
+capture the same structured job:
+
+- When the `ghostscript` component is selected, Setup now installs the virtual printer
+  with `-PrinterMode PostScript` (`Microsoft PS Class Driver`). Ghostscript's `txtwrite`
+  device then produces the clean columns the Palladium profile expects, and `pdfwrite`
+  stores the original as `<hash>.pdf` beside the decoded `<hash>.txt` for audit and
+  original-invoice stamping.
+- A text-only till still installs with `Generic / Text Only`; select only the `printer`
+  task or build with `-NoGhostscript`.
+- An existing till can be switched in place from an elevated prompt:
+  `.\addprinter.ps1 -PrinterName 'FiscalStack Fiscal Printer' -Mode PostScript`.
+  Restart the service afterwards so it picks up the new config.
+
 ### What gets signed
 
 - Every `PrintInterceptor*.exe` in the publish folder, with SHA-256 and an RFC 3161
@@ -382,7 +401,8 @@ per release on a Windows machine:
    message — that is the guard, not a bug to work around by adding `-NoGhostscript`.
 2. `signtool verify /pa /v dist\PrintInterceptor-<v>-setup.exe` and the same for
    `publish\PrintInterceptor.exe` report a valid timestamped signature.
-3. Silent install on a clean VM: printer and port exist, `Get-Service
+3. Silent install on a clean VM: printer and port exist and the printer uses
+   `Microsoft PS Class Driver` when the Ghostscript task is selected, `Get-Service
    PrintInterceptor` is running, `--register-key` stores the key in
    `%ProgramData%\FiscalStack\PrintInterceptor\secrets\`, and only Administrators/SYSTEM
    (plus the tray user in tray mode) can read `config.json` and the secrets folder.

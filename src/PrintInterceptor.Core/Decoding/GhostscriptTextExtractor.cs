@@ -50,6 +50,10 @@ public sealed class GhostscriptTextExtractor
 
             var startInfo = GhostscriptRunner.BuildStartInfo(executable);
             startInfo.ArgumentList.Add("-sDEVICE=txtwrite");
+            // txtwrite has no usable default output: without -sOutputFile Ghostscript
+            // exits with "Unable to open the initial device", so a PDF/PostScript job
+            // never reaches the parser even though the executable was found.
+            startInfo.ArgumentList.Add($"-sOutputFile={outputPath}");
             startInfo.ArgumentList.Add(inputPath);
 
             var run = await GhostscriptRunner.RunAsync(startInfo, _config, _log, cancellationToken);
