@@ -41,7 +41,7 @@ public sealed class ReconcileService : BackgroundService
                 {
                     _intervalDisabledReported = true;
                     _log.Info(
-                        "reconcile.intervalMinutes is 0; reconciliation runs at startup and from the tray only.");
+                        "reconcile.intervalMinutes is 0; reconciliation runs at startup and from the console's Files & tools page only.");
                 }
             }
 

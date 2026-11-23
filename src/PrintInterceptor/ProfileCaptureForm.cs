@@ -639,7 +639,7 @@ public sealed class ProfileCaptureForm : Form
                 _log.Info($"Captured and applied parse profile '{name}'; the rules were written to the configuration file.");
                 MessageBox.Show(this,
                     $"Profile '{name}' was saved to:\r\n{path}\r\n\r\nIt is now this till's layout, and its rules are " +
-                    $"saved in {_config.ConfigPath}.\n\nRestart PrintInterceptor (or the service) to parse with them; " +
+                    $"saved in {_config.ConfigPath}.\n\nNew print jobs are read with these rules immediately; " +
                     "the receipts it has already read are unaffected.",
                     "Profile saved and applied", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 DialogResult = DialogResult.OK;
@@ -648,7 +648,7 @@ public sealed class ProfileCaptureForm : Form
             }
 
             MessageBox.Show(this,
-                $"Profile '{name}' was saved to:\r\n{path}\r\n\r\nChoose it in Settings to start using it.",
+                $"Profile '{name}' was saved to:\r\n{path}\r\n\r\nChoose it in Parse rules to start using it.",
                 "Profile saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException or JsonException)

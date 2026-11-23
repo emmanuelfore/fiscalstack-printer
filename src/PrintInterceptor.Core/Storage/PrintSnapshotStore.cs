@@ -40,7 +40,13 @@ public sealed class PrintSnapshotStore
 
     public string FiscalArchiveDirectoryPath => _archive.DirectoryPath;
 
+    /// <summary>The permanent human-readable fiscal record, when one was stored.</summary>
+    public string? FiscalTextPath(string hash) => _archive.FindByHash(hash, ".txt");
+
     public bool Exists(string hash) => File.Exists(PathFor(hash));
+
+    /// <summary>True when either the snapshot or the permanent fiscal archive can print this job.</summary>
+    public bool ExistsDurable(string hash) => LoadDurable(hash) is not null;
 
     public bool Save(string hash, ReceiptPrintModel model)
     {

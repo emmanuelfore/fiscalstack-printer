@@ -19,7 +19,22 @@ internal static class A4InvoicePrinter
     private const int A4Width = 827;   // 595.28 pt at 1/100 inch
     private const int A4Height = 1169; // 841.89 pt at 1/100 inch
 
-    public static void Print(ReceiptPrintModel model, ILog log)
+    public static void Print(ReceiptPrintModel model, ILog log) =>
+        PrintCore(model, log, printerOverride: null, outputPdfPath: null);
+
+    /// <summary>
+    /// Writes the same A4 fiscal layout to a PDF using Windows' built-in Microsoft Print to PDF
+    /// driver. No new PDF toolchain is needed, and the downloaded copy looks exactly like the
+    /// printed invoice: same fiscal fields, QR payload, stamp and totals.
+    /// </summary>
+    public static void ExportPdf(ReceiptPrintModel model, string outputPdfPath, ILog log) =>
+        PrintCore(model, log, printerOverride: "Microsoft Print to PDF", outputPdfPath);
+
+    private static void PrintCore(
+        ReceiptPrintModel model,
+        ILog log,
+        string? printerOverride,
+        string? outputPdfPath)
     {
         var document = new PrintDocument
         {
@@ -28,14 +43,18 @@ internal static class A4InvoicePrinter
             OriginAtMargins = false
         };
 
-        var printerName = model.EffectivePrinterName;
+        var printerName = string.IsNullOrWhiteSpace(printerOverride)
+            ? model.EffectivePrinterName
+            : printerOverride!;
         if (!string.IsNullOrWhiteSpace(printerName))
         {
             if (!PrinterSettings.InstalledPrinters.Cast<string>()
                     .Any(name => string.Equals(name, printerName, StringComparison.OrdinalIgnoreCase)))
             {
                 throw new InvalidOperationException(
-                    $"Printer '{printerName}' is not installed. Check printing.a4PrinterName.");
+                    outputPdfPath is null
+                        ? $"Printer '{printerName}' is not installed. Check printing.a4PrinterName."
+                        : "Microsoft Print to PDF is not installed; enable the Windows optional feature to save a PDF copy.");
             }
 
             document.PrinterSettings.PrinterName = printerName;
@@ -43,10 +62,24 @@ internal static class A4InvoicePrinter
 
         if (!document.PrinterSettings.IsValid)
         {
-            throw new InvalidOperationException("No valid A4 printer is available.");
+            throw new InvalidOperationException(outputPdfPath is null
+                ? "No valid A4 printer is available."
+                : "Microsoft Print to PDF is not available on this till.");
         }
 
-        document.PrinterSettings.Copies = (short)Math.Clamp(model.Copies, 1, 5);
+        document.PrinterSettings.Copies = 1;
+        if (!string.IsNullOrWhiteSpace(outputPdfPath))
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(outputPdfPath));
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            document.PrinterSettings.PrintToFile = true;
+            document.PrinterSettings.PrintFileName = Path.GetFullPath(outputPdfPath);
+        }
+
         document.DefaultPageSettings.PaperSize = ResolveA4Paper(document) ??
                                                  new PaperSize("A4", A4Width, A4Height);
         document.DefaultPageSettings.Landscape = false;
@@ -103,9 +136,9 @@ internal static class A4InvoicePrinter
         private const float AccentBarBottom = 3f;
 
         private const float CardWidth = 0.48f;
-        private const float CardPadding = 9f;
-        private const float PartiesGap = 12f;
-        private const float CardRadius = 6f;
+        private const float CardPadding = 10f;
+        private const float PartiesGap = 14f;
+        private const float CardRadius = 8f;
         private const float SectionUnderlineGap = 4f;
         private const float SectionTitleGap = 6f;
         private const float PartyNameGap = 2f;
@@ -117,7 +150,7 @@ internal static class A4InvoicePrinter
         private const float FiscalRowGap = 4f;
         private const float FiscalLabelWidth = 0.40f;
         private const float FiscalColumnWidth = 0.48f;
-        private const float FiscalGap = 16f;
+        private const float FiscalGap = 18f;
 
         private const float NoteBandPadding = 5f;
         private const float NoteBandGap = 6f;
@@ -127,18 +160,18 @@ internal static class A4InvoicePrinter
         private const float PadHorizontal = 4f;
         private const float HeaderRowGap = 3f;
         private const float RowPadVertical = 5f;
-        private const float TableGap = 14f;
+        private const float TableGap = 16f;
         private const float DefaultLineHeight = 1.2f;
 
         private const float SummaryWidth = 0.46f;
         private const float SummaryPadding = 8f;
-        private const float SummaryTop = 14f;
+        private const float SummaryTop = 16f;
         private const float TaxRowGap = 2f;
         private const float TotalsRowGap = 4f;
         private const float GrandTotalTop = 5f;
         private const float GrandTotalPadding = 7f;
 
-        private const float NotesTop = 18f;
+        private const float NotesTop = 20f;
         private const float NotesPadding = 10f;
         private const float NotesTitleGap = 4f;
 
@@ -340,6 +373,14 @@ internal static class A4InvoicePrinter
 
         private float DrawTitle(Graphics g, float y)
         {
+            // A quiet tint behind the document type gives the fiscal title hierarchy without
+            // touching any of the text, amounts, QR payload or counters drawn below it.
+            using (var band = RoundedRectangle(Left - Pt(8), y - Pt(6), Usable + Pt(16), Pt(46), Pt(8)))
+            using (var tint = new SolidBrush(Color.FromArgb(18, _accent.R, _accent.G, _accent.B)))
+            {
+                g.FillPath(tint, band);
+            }
+
             y = DrawSingle(g, DocumentTitle(), _title, _textBrush, Left, y, Usable, StringAlignment.Center);
             y += Pt(AccentBarTop);
 

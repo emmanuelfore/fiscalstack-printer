@@ -11,7 +11,7 @@ code, fiscal code and receipt counters.
 
 When the API is unreachable it can instead **sign the receipt on the till** with the ZIMRA
 device key, print it, and sync the queued receipt once the connection returns. It runs
-either as a Windows service or as a **tray application** with a status icon and settings.
+either as a Windows service or as a **tray application** with a status icon and an operator console.
 
 ```
 POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
@@ -159,7 +159,7 @@ starts with `sk_test_` or `sk_live_`. **Register it on the till** — do not pas
 .\publish\PrintInterceptor.exe --register-key    # hidden prompt; DPAPI + ACL, no shell history
 ```
 
-The tray's **Settings → API key** does the same. See [Secret management](#secret-management)
+The console's **Settings → API key** does the same. See [Secret management](#secret-management)
 for rotation and why a machine environment variable is only a legacy fallback.
 
 Other environment overrides:
@@ -180,7 +180,7 @@ a backup script, or a deployment variable.
 - `PrintInterceptor.exe --register-key` is the **default path**. It prompts for the key
   without echo, reads it from stdin when piped, and writes it to the machine-bound secret
   store at `<config folder>\secrets\api-key.protected`. The key never appears on a command
-  line, in PowerShell history, or in a process listing. The tray's **Settings → API key**
+  line, in PowerShell history, or in a process listing. The console's **Settings → API key**
   is the equivalent GUI path.
 - `Save` serialises a copy of the configuration with `apiKey: ""`, writes it atomically and
   flushes to disk; it never blanks the live in-memory key. A key found in an old
@@ -245,18 +245,18 @@ the same name:
 | `{app}\profiles` | Shipped with the release. Read-only. |
 | `%ProgramData%\FiscalStack\PrintInterceptor\profiles` | Imported and captured profiles. |
 
-In **Settings → Receipt parsing profile**: pick one and press **Use this profile**,
-**Import…** a file received from another till, or **Save current rules as…** to capture what
-this till is reading correctly today and hand it to the next one. The tray menu has
-*Import receipt parse profile…*, *Capture receipt layout from a job…* (below) and
-*Open parse profiles folder*.
+In the console's **Parse rules → Profiles** page: pick one and press **Use selected profile**,
+**Import a profile…** a file received from another till, or **Save these rules as a profile…**
+to capture what this till is reading correctly today and hand it to the next one. The same
+actions are available from **Files & tools**, alongside *Capture receipt layout from a job…*
+(below) and *Open parse profiles folder*.
 
 Applying writes the resolved rules into `config.json` and records the name in `parse.profile`
 as provenance. The configuration stays the single source of truth, so deleting a profile file
 cannot leave a till unable to read its receipts, and rules tuned by hand survive a restart — a
-profile is only ever applied when an operator presses the button. The parser reads the rules
-when it starts, so an applied profile takes effect after PrintInterceptor (or the service)
-restarts.
+profile is only ever applied when an operator presses the button. The console rebuilds the live
+parser after an apply or save, so new print jobs use the rules immediately; already-processed
+receipts are unaffected.
 
 **What a profile cannot change.** A profile decides where text is found, which default VAT
 bucket the till uses (`defaultTaxType`), the STANDARD percentage (`vatRate`) when the paper
@@ -276,8 +276,8 @@ backtracks forever holds that one job for review instead of stalling the till.
 ### Capturing a profile from a job the till already caught
 
 A new POS is usually discovered by failure: a job lands in **Needs review** because no rule
-describes its layout. *Capture receipt layout from a job…* (tray menu) turns that job into the
-profile instead of making someone hand-write one:
+describes its layout. *Capture receipt layout from a job…* (**Files & tools** in the console)
+turns that job into the profile instead of making someone hand-write one:
 
 - Pick a job from the dropdown — the receipts this till kept, newest first — or **From file…**
   a saved printout. The text is shown exactly as it arrived and stays editable, so a receipt
@@ -300,7 +300,7 @@ profile instead of making someone hand-write one:
   into the file — a guess about a credit note files an ordinary sale as a return.
 
 **Save profile** writes it to `%ProgramData%\…\profiles\<id>.json`; **Save and use now** also
-applies it and records it in `config.json`, which still needs a restart before it parses.
+applies it and records it in `config.json`; the live parser is rebuilt immediately.
 Because a profile states only differences, the file contains the labels and column words this
 POS adds, not a copy of the built-in rules — and a rule whose marker the parser would find on
 the wrong line (a footer word that also names a column, like `Total`) is never offered.
@@ -395,58 +395,76 @@ so choose one mode per till.
   sync or capture paused; red = API unreachable, status unknown, or the sync queue is paused.
   The tooltip shows the API state, fiscal day, queued receipts, receipts held for review and
   whether capture is paused.
-- **Menu:** live API status, fiscal day number/state, *Open fiscal day…* / *Close fiscal day…*
-  (enabled from the live state; the close item reads *Retry close fiscal day…* after a failed
-  close), queue size, receipts needing review, *Resume offline sync*
-  (only while paused), *Show/Hide Dashboard*, *Pause/Resume capture*, *Check for updates…*,
-  *Sync offline receipts now*, *Reconcile unknown receipts now*,
-  *Fiscal status…*, *Fiscalisation jobs…*, *Daily Z-shift summary…*,
-  *Test connection*, *Settings…*, open the config / logs / current log file / data / parse-profile
-  folders, *Import receipt parse profile…*, *Capture receipt layout from a job…*,
-  *Start with Windows*, *Exit*. Day open/close asks for confirmation and reports the gateway's
-  answer; the device state is polled every 30 seconds. Only one tray runs per desktop session:
-  a second copy exits with a message instead of fighting over the capture port.
-- **Dashboard** (double-click the icon or *Show Dashboard*): today's KPIs (receipts fiscalised,
-  queued/retrying, needing review, totals by currency), an hourly activity chart, the latest jobs
-  with a status filter, and the fiscal-day card with a live elapsed timer and close-day checks
-  (FDMS reachable, queue empty, nothing needing review). It reads the local ledger, so it works
-  offline; only the device card needs FiscalStack. It stays open beside the till; the menu item
-  and the icon toggle it between shown and hidden.
+- **Menu:** deliberately short — one live status line, urgent alerts (only when there is
+  something to act on), *Show/Hide Dashboard*, *Pause/Resume capture*, *Start with Windows* and
+  *Exit*. Everything else moved into the console. Day open/close still asks for confirmation and
+  reports the gateway's answer; the device state is polled every 30 seconds. Only one tray runs
+  per desktop session: a second copy exits with a message instead of fighting over the capture
+  port.
+- **Operator console** (double-click the icon or *Show Dashboard*): a dark left rail with
+  **Overview**, **Parse rules**, **Jobs**, **Reports**, **Settings**, **Fiscal status**,
+  **Capture layout** and **Files & tools**. Overview keeps today's KPIs (receipts fiscalised,
+  queued/retrying, needing review, totals by currency), the hourly activity chart, a compact
+  fiscalisation worklist with status pills, and the fiscal-day card with its live timer and
+  close-day checks. It reads the local ledger, so it works offline; only the device card needs
+  FiscalStack. The console stays open beside the till; the tray item and the icon toggle it
+  between shown and hidden. A first run opens straight to the Settings page.
+- **Parse rules** edits the resolved rules as real controls — labels, regex patterns, tax buckets,
+  correction words, limits and currencies — on a draft that is validated before it can be saved.
+  The *Test a receipt* page reparses pasted text with the draft, and *Save and apply* rebuilds the
+  live parser so new jobs use the rules without a restart. Profiles can be applied, imported and
+  saved from the same page.
+- **Settings** is a page in the console, not a separate dialog: endpoint, API key, print format
+  and printers, paper width and the offline switch — no long explanatory prose, and no duplicate
+  parsing controls (those live on *Parse rules*).
+  **Refresh from FiscalStack** provisions the ZIMRA device, key, tax buckets and counters and
+  shows the result (device, serial, fiscal day, counters, key source). Printing changes apply on
+  the next receipt; restart the app after changing the endpoint, API key, or offline signing.
+  The private key itself is held in the DPAPI secret store under `secrets`, never in
+  `config.json` or the provisioning cache. See [Secret management](#secret-management).
+- **Files & tools** also holds *Sync offline receipts now*, *Reconcile unknown receipts now*,
+  *Test connection* and the shortcuts to configuration, data, received/fiscalised files, logs and
+  profiles.
 - **Pause/Resume capture** holds fiscalisation without refusing prints: the spooler still delivers,
   captured jobs wait in the queue, and resuming processes them in order. Shutdown always resumes
   so nothing captured is lost. Do not leave a till paused at closing time.
-- **Check for updates…** runs the bundled `updater/auto-update.ps1` in dry-run mode after an
-  elevation prompt. It verifies the HTTPS manifest, SHA256, the pinned Authenticode signer and
-  the till's health, and reports the result; it never installs or stops the tray. Set
-  `update.signerThumbprint` in `config.json` to the release certificate's 40 hex characters first
-  (spaces and colons in a pasted value are ignored). Installation stays with the scheduled task
-  described in [packaging/README.md](packaging/README.md#enable-auto-update).
+- **Check for updates** (sidebar footer or Files & tools) runs the bundled
+  `updater/auto-update.ps1` in dry-run mode after an elevation prompt. It verifies the HTTPS
+  manifest, SHA256, the pinned Authenticode signer and the till's health, and reports the result;
+  it never installs or stops the tray. Set `update.signerThumbprint` in `config.json` to the
+  release certificate's 40 hex characters first (spaces and colons in a pasted value are ignored).
+  Installation stays with the scheduled task described in
+  [packaging/README.md](packaging/README.md#enable-auto-update).
 - **Notifications** (balloons on transition, not repeatedly): a fiscal day close failed, the
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
-- **Settings** edits the endpoint, API key, print format and printers, paper width, the
-  [parsing profile](#parsing-profiles), whether printed prices include VAT, and the offline
-  switch, then writes `config.json`.
-  **Refresh from FiscalStack** provisions the ZIMRA
-  device, key, tax buckets and counters and shows the result (device, serial, fiscal day,
-  counters, key source). Printing changes apply on the next receipt; restart the app after
-  changing the endpoint, API key, or offline signing, and after applying a parsing profile.
-  The private key itself is held in the DPAPI secret store under `secrets`, never in
-  `config.json` or the provisioning cache. See [Secret management](#secret-management).
-- **Start with Windows** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it
-  applies to the user who ticks it, not to all users.
+- **Start with Windows** (tray menu or Files & tools) writes
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it applies to the user who ticks it,
+  not to all users.
 
 Double-clicking the icon toggles the dashboard. There is no single required main window; the app
 keeps running in the notification area until *Exit* is chosen.
 
 ### Fiscalisation jobs and job detail
 
-*Fiscalisation jobs…* lists every ledger entry with its status, total, print result and reason,
-filterable by needs review / rejected / unknown outcome / fiscalised / printing problems. A
-double-click opens the job drawer with three tabs: the full record (including reprint count,
+**Jobs** is one compact worklist of every ledger entry with a status pill, print result and reason,
+searchable by invoice, fiscal code, verification code or source file and filterable by needs
+review / rejected / unknown outcome / fiscalised / printing problems. Each row has three actions:
+
+- **Open** — opens the retained POS document, or the human-readable fiscal archive when no source
+  file survived retention.
+- **PDF** — writes the fiscal copy to `Downloads` with a clean
+  `FiscalStack-<invoice>-<date>-<hash>.pdf` name. It is rendered through the same A4 fiscal layout
+  as the printed invoice by Windows' *Microsoft Print to PDF* driver; every fiscal field, QR
+  payload, total and `taxType` on the page is the stored value, never a recalculation.
+- **Print** — prints the stored fiscal copy, marked **REPRINT**, on the configured printer. It
+  falls back to the permanent `fiscalised/<date>/` archive when the short-lived print snapshot was
+  pruned. The fiscalisation result is never sent to FiscalStack again.
+
+A double-click opens the job drawer with three tabs: the full record (including reprint count,
 suppressed duplicate attempts and reconciliation passes), the exact request body that was sent
 (as retained by `storage.retainJobs`), and the receipt text it was built from. It is a read-only
-investigation view: reprints still go through the explicit button after confirmation.
+investigation view: reprints still go through the explicit action after confirmation.
 
 ### Fiscal status and day control
 
@@ -484,11 +502,18 @@ rejected fiscal day on its own.
 
 ### Daily Z-shift summary and accountant export
 
-*Daily Z-shift summary…* opens the day's fiscal position as this till knows it: the documents it
-fiscalised, their VAT buckets, the receipt numbers they carry, and everything still outstanding.
-Pick a business date with the date control (or **Previous day** / **Next day**), then
-**Save summary…** for the printable text and **Export lines (CSV)…** for the accountant's file
-(`fiscal-day-<date>.txt`, `fiscal-lines-<date>.csv`).
+**Reports** opens the report centre: the day's fiscal position as this till knows it, shown as a
+searchable table of fiscal lines with their `taxType`, rate, totals and fiscal codes, plus the
+original Z-shift statement on a second tab. Pick one business date or a range (up to 31 days) with
+the **From / To** controls and **Today** / **Last 7 days** shortcuts, then:
+
+- **Download PDF** writes a clean `FiscalStack-report-<date>.pdf` copy to `Downloads`.
+- **Print report** sends the same table to the configured default printer.
+- **Export CSV** writes the accountant's file (`fiscal-lines-<date>.csv`) with the original schema.
+- **Save TXT** writes the full Z-shift statement (`fiscal-day-<date>.txt`).
+
+A range is a read-only sum of the daily reports; each CSV row keeps its own business date and
+fiscal proof.
 
 The report reads local state only — the [job ledger](#failure-handling) for the date plus the
 printed fiscal copy behind each document (the snapshot in `state/print-snapshots`, or the durable
@@ -599,7 +624,8 @@ Every spacing, font size and colour comes from that stylesheet, and 1 pt values 
 to the driver's 1/100-inch units; Arial stands in for the embedded Helvetica because it is the
 metric twin that is guaranteed to exist on Windows. It is drawn directly through the Windows
 printer driver, so it prints silently from the service — no browser, WebView or PDF toolchain
-is required, and no PDF file is produced.
+is required. When an operator chooses **PDF** on a job row, Windows' *Microsoft Print to PDF*
+driver renders that same page to a file; the service never needs a PDF library.
 `parse.vatFlag = "0"` (or `vatInclusive: false` in a profile) switches the table to
 exclusive-VAT columns (`Amount (excl.)`) and sends that ex-VAT price to the gateway.
 
@@ -674,7 +700,7 @@ Captured jobs: `data\jobs\yyyy-MM-dd\`. Durable state:
 | `data\state\fiscal-chain.json` | Device id, fiscal day, receipt counter, global number, last hash. |
 | `data\state\offline-queue\` | One JSON file per signed receipt waiting to sync, oldest-first by filename. |
 | `data\state\offline-failed\` | Receipts the server rejected or that need reconciliation; never auto-retried. |
-| `data\state\offline-sync-pause.json` | Present while the sync queue is paused after a rejection. Delete only after reconciling, or use *Resume offline sync* in the tray. |
+| `data\state\offline-sync-pause.json` | Present while the sync queue is paused after a rejection. Delete only after reconciling, or use the tray's *Resume offline sync* alert. |
 | `data\state\offline-provisioning.json` | Cached device id, serial, tax buckets and counters from FiscalStack. The private key lives in `secrets\device-key.protected`, not here. |
 
 The service runs as LocalSystem, so the configured printer must be visible to that account.
@@ -689,7 +715,7 @@ ZIMRA-shaped receipt without the API:
    signed with the device key against the durable counter chain, written to the offline
    queue, marked `FiscalisedOffline` in the ledger, and printed with an `OFFLINE` header,
    its counters, verification code and QR code.
-3. A background loop (and the tray's *Sync offline receipts now*) pushes queued receipts
+3. A background loop (and the console's *Sync offline receipts now*) pushes queued receipts
    oldest-first. On success the ledger becomes `Fiscalised`, the chain adopts the server's
    counters/hash, and the queue entry is deleted.
 
@@ -713,7 +739,7 @@ secret store; the non-secret state is cached in `data/state/offline-provisioning
 restart during an outage can still sign offline. A plaintext key left in that cache by an
 older build is stripped on startup and never used. Offline signing refuses to start with an
 actionable error if the store is unavailable or the key cannot be protected. Press
-**Refresh from FiscalStack** in tray Settings to provision or re-read the state; the dialog
+**Refresh from FiscalStack** in the console's Settings page to provision or re-read the state; the page
 shows the device, serial, fiscal day, counters, key source and tax mapping. See
 [Secret management](#secret-management).
 
@@ -879,7 +905,7 @@ Every `POST /fiscalize` creates a real ZIMRA receipt, so capture is deliberately
 | Timeout, connection failure, 5xx, unreadable 2xx | `AmbiguousFailure` — **never retried automatically**, because the receipt may already exist at ZIMRA. [Reconciliation](#reconciling-an-unknown-receipt) settles it |
 | API unreachable and `offline.enabled` | Signed offline, queued and printed; retried only by the sync loop |
 | Offline signing requested but key missing/invalid | `NeedsReview`; the reason is logged and shown at startup |
-| Offline sync rejected | Receipt moved to `offline-failed`; the queue is paused durably until reconciled and resumed from the tray. Most often the fiscal day closed while it was queued |
+| Offline sync rejected | Receipt moved to `offline-failed`; the queue is paused durably until reconciled and resumed from the tray's urgent alert. Most often the fiscal day closed while it was queued |
 | Offline sync timed out / 5xx | Receipt kept at the head, marked `AmbiguousFailure`; later receipts stay blocked and the same one is retried — verify with FiscalStack before letting it continue |
 | Fiscalised but printing fails | Ledger says `Printed=Failed`; the receipt is **not** re-fiscalised. Reprint from FiscalStack or check the printer |
 | Duplicate invoice/date or identical job | Skipped, with a log line |
@@ -925,12 +951,12 @@ alternative is a fiscal problem nobody can undo:
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `reconcile.enabled` | `true` | Runs the automatic passes; *Reconcile unknown receipts now* works regardless. |
-| `reconcile.intervalMinutes` | `15` | Minutes between background passes. `0` means startup and the tray only. |
+| `reconcile.intervalMinutes` | `15` | Minutes between background passes. `0` means startup and the console's *Files & tools* action only. |
 | `reconcile.autoResend` | `true` | Replay a receipt the server has never heard of. `false` = only adopt the server's proof, never send. |
-| `reconcile.maxAttempts` | `3` | Passes per job before it is left for the operator. The tray action ignores the budget. |
+| `reconcile.maxAttempts` | `3` | Passes per job before it is left for the operator. The manual console action ignores the budget. |
 | `reconcile.scanPages` | `10` | Pages of 100 invoices the lookup reads, newest first. |
 
-A pass runs at startup, then every `intervalMinutes`, and on demand from the tray; one pass at
+A pass runs at startup, then every `intervalMinutes`, and on demand from *Files & tools*; one pass at
 a time, so a slow server cannot stack them. Adopted proofs print without a verification code
 because the list route does not carry one — the fiscal code, QR data and receipt numbers on the
 paper are the gateway's own, and the full document is in FiscalStack. Reconciliation is also
@@ -960,10 +986,10 @@ settles receipts that exist, and a receipt the server does not have is set aside
 - Invoice numbers come from the receipt text. If the POS does not print one, dedup falls
   back to the text hash; configure `parse.invoiceNumber` where possible.
 - A [parsing profile](#parsing-profiles) changes only where text is found: a layout whose
-  lines do not add up is still held for review, not fiscalised from a best guess. Applying
-  one takes effect at the next restart, and the profile controls in Settings are WinForms
-  code authored on a Linux host — click through *Use this profile*, *Import…* and
-  *Save current rules as…* once on a Windows till.
+  lines do not add up is still held for review, not fiscalised from a best guess. Apply one
+  from **Parse rules → Profiles**; the live parser is rebuilt immediately. Click through
+  *Use selected profile*, *Import a profile…* and *Save these rules as a profile…* once on
+  the Windows till before rolling it out.
 - Buyer details reach ZIMRA only when the receipt text carried a 10-digit TIN; identifiers the
   gateway's schema rejects are dropped instead of sent, so a malformed VAT number disappears
   from the fiscal receipt rather than failing the sale. See
@@ -980,8 +1006,8 @@ settles receipts that exist, and a receipt the server does not have is set aside
 - A4 invoices are rendered with GDI, not from FiscalBridge's HTML. The geometry is taken from
   the invoice template's stylesheet, but the driver substitutes its own metrics for Arial and
   rounds to its own dot grid, so a printed page can differ from the PDF by a fraction of a
-  millimetre. No PDF copy is saved; FiscalStack remains the source for archived fiscal
-  documents.
+  millimetre. A PDF copy is saved only when the operator asks for one; FiscalStack remains the
+  source for archived fiscal documents.
 
 ## Licensing note
 

@@ -16,7 +16,7 @@ public sealed class PrintJobPipeline : IJobProcessor
 {
     private readonly InterceptorConfig _config;
     private readonly JobDecoder _decoder;
-    private readonly ReceiptParser _parser;
+    private ReceiptParser _parser;
     private readonly FiscalStackClient _client;
     private readonly JobLedger _ledger;
     private readonly JobStore _jobStore;
@@ -63,6 +63,13 @@ public sealed class PrintJobPipeline : IJobProcessor
         _offlineQueue.ChainProvider = () => _offline.Chain.Current;
         _offlineQueue.RecoverPending();
     }
+
+    /// <summary>
+    /// Rebuilds the parser after the operator edits layout rules in the dashboard. The parser
+    /// compiles its regexes once in its constructor, so the live pipeline must swap in a new
+    /// one; the reference assignment is atomic and a parse already under way finishes safely.
+    /// </summary>
+    public void ReloadParser() => Interlocked.Exchange(ref _parser, new ReceiptParser(_config.Parse));
 
     public async Task ProcessAsync(PrintJob job, CancellationToken cancellationToken)
     {
@@ -803,15 +810,16 @@ public sealed class PrintJobPipeline : IJobProcessor
     }
 
     /// <summary>
-    /// Reprints the fiscal copy stored for a job. Only entries with a snapshot
-    /// can be reprinted; the fiscalisation result is never repeated.
+    /// Reprints the fiscal copy stored for a job. The permanent fiscal archive is a fallback,
+    /// so a document can still be printed after its short-lived print snapshot was pruned.
+    /// The fiscalisation result is never repeated.
     /// </summary>
     public bool TryReprint(string hash, out string error)
     {
-        var model = _snapshots.Load(hash);
+        var model = _snapshots.LoadDurable(hash);
         if (model is null)
         {
-            error = "No print snapshot was stored for this job, so it cannot be reprinted here.";
+            error = "No fiscal copy was stored for this job, so it cannot be reprinted here.";
             return false;
         }
 

@@ -78,9 +78,9 @@ to exercise timestamping as well.
 Outputs (under `..\dist` by default, override with `-OutputRoot`):
 
 - `publish\` — the self-contained application plus the three install scripts, the
-  shipped `profiles\` folder (the read-only receipt layouts Settings and the tray list;
-  see [Parsing profiles](../README.md#parsing-profiles)), and `ghostscript\` unless
-  `-NoGhostscript` was used.
+  shipped `profiles\` folder (the receipt layouts listed by the console's **Parse rules**
+  page and **Files & tools** shortcut; see [Parsing profiles](../README.md#parsing-profiles)),
+  and `ghostscript\` unless `-NoGhostscript` was used.
 - `PrintInterceptor-<version>-win-x64.zip` — for manual/USB installs.
 - `PrintInterceptor-<version>-setup.exe` — Inno Setup installer (when available).
 
@@ -244,7 +244,7 @@ stamps original invoices; without the task the bundle is not installed and no
 
 # Register the API key (hidden prompt, no key on any command line; restart afterwards)
 .\publish\PrintInterceptor.exe --register-key
-# The tray's Settings dialog is the equivalent GUI path.
+# The console's Settings page is the equivalent GUI path.
 
 # Additional options
 #   -PrinterMode PostScript   (bundled Ghostscript is preferred; see above)
@@ -289,7 +289,7 @@ the offline queue and the job ledger.
 
 Uninstalling is not the same as de-registering the till: fiscal receipts already
 issued stay valid, but any queued offline receipts in `data\state` are lost with
-`-Purge`. Sync them first from the tray (*Sync offline receipts now*).
+`-Purge`. Sync them first from the console's *Files & tools* page (*Sync offline receipts now*).
 
 ## Enable auto-update
 
@@ -336,7 +336,7 @@ Useful controls:
 .\updater\install-update-task.ps1 -Remove
 ```
 
-An operator can run the same verification from the tray with *Check for updates…*.
+An operator can run the same verification from the console with *Check for updates*.
 It prompts for elevation, reads `update.manifestUrl`, `update.signerThumbprint` and
 `update.channel` from `config.json`, and runs the updater with `-DryRun
 -AllowTrayUpdate`: the manifest, hash, signature and health checks are reported, but
@@ -373,7 +373,7 @@ service).
 ## Secret management on a till
 
 - **Register, don't paste:** run `PrintInterceptor.exe --register-key` after install
-  (hidden prompt, also accepts piped stdin) or use the tray **Settings → API key**.
+  (hidden prompt, also accepts piped stdin) or use the console's **Settings → API key**.
   The key is never on a command line, in shell history, or in `config.json`; `Save`
   writes a blank `apiKey` atomically and keeps the live value in memory.
 - **Protection:** the API key and the ZIMRA device key are `LocalMachine` DPAPI blobs
@@ -470,7 +470,7 @@ per release on a Windows machine:
 ## Notes and open items
 
 - The installer does not bundle an API key. After installing, run
-  `PrintInterceptor.exe --register-key` (hidden prompt) or use the tray Settings.
+  `PrintInterceptor.exe --register-key` (hidden prompt) or use the console's Settings page.
   `-ApiKey` and `PRINTINTERCEPTOR_API_KEY` are deprecated fallbacks: a key baked
   into a shared script or registry value is readable by anyone with access to it.
 - Inno's `/Ssigntool` command and `install.ps1`'s argument line are built as single

@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using PrintInterceptor.Core.Capture;
 using PrintInterceptor.Core.Configuration;
 using PrintInterceptor.Core.Diagnostics;
 using PrintInterceptor.Core.Fiscalisation;
@@ -16,12 +17,30 @@ namespace PrintInterceptor;
 /// the fiscal-day position with the close-day checks. It reads the same local ledger the service
 /// writes, so it works when the network is down; only the device card needs FiscalStack.
 /// </summary>
+public sealed record DashboardActions(
+    Func<SettingsForm> CreateSettingsForm,
+    Action<string> RunTool,
+    Func<JobsForm>? CreateJobsForm = null,
+    Func<DayReportForm>? CreateReportForm = null);
+
+/// <summary>
+/// Operator console: the dashboard is the single place to work, and the tray is deliberately
+/// short. Pages are switched in the left rail; the old dialogs stay available as pages or as
+/// tool actions from the same rail.
+/// </summary>
 public sealed class DashboardForm : Form
 {
-    private static readonly Color OkColor = Color.FromArgb(22, 101, 52);
-    private static readonly Color WarnColor = Color.FromArgb(180, 83, 9);
-    private static readonly Color BadColor = Color.FromArgb(185, 28, 28);
-    private static readonly Color MutedColor = Color.FromArgb(100, 116, 139);
+    private const int RecentUpdated = 0;
+    private const int RecentInvoice = 1;
+    private const int RecentType = 2;
+    private const int RecentStatus = 3;
+    private const int RecentTotal = 4;
+    private const int RecentPrint = 5;
+
+    private static readonly Color OkColor = UiTheme.Success;
+    private static readonly Color WarnColor = UiTheme.Warning;
+    private static readonly Color BadColor = UiTheme.Danger;
+    private static readonly Color MutedColor = UiTheme.Muted;
 
     private readonly InterceptorConfig _config;
     private readonly FiscalStackClient _client;
@@ -42,7 +61,7 @@ public sealed class DashboardForm : Form
     private readonly Label _kpiReview;
     private readonly Label _kpiTotal;
     private readonly HourlyChart _chart;
-    private readonly ListView _recent;
+    private readonly DataGridView _recent;
     private readonly Label _recentCount;
     private readonly ComboBox _recentFilter;
     private readonly Label _dayTitle;
@@ -59,6 +78,15 @@ public sealed class DashboardForm : Form
     private bool _refreshing;
     private bool _dayActionInFlight;
 
+    private readonly DashboardActions _actions;
+    private readonly PrintJobServer _server;
+    private readonly Panel _pages;
+    private readonly Dictionary<string, Control> _pageCache = new();
+    private readonly Dictionary<string, Button> _navButtons = new();
+    private readonly Button _pauseButton;
+    private readonly Label _captureState;
+    private string _currentPage = "Overview";
+
     public DashboardForm(
         InterceptorConfig config,
         FiscalStackClient client,
@@ -68,7 +96,10 @@ public sealed class DashboardForm : Form
         PrintSnapshotStore snapshots,
         PrintJobPipeline pipeline,
         JobStore jobs,
-        ILog log)
+        ILog log,
+        DashboardActions actions,
+        PrintJobServer server,
+        string? initialPage = null)
     {
         _config = config;
         _client = client;
@@ -79,22 +110,49 @@ public sealed class DashboardForm : Form
         _pipeline = pipeline;
         _jobs = jobs;
         _log = log;
+        _actions = actions;
+        _server = server;
 
-        Text = "PrintInterceptor — Dashboard";
+        Text = "PrintInterceptor — Operator console";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(1120, 720);
-        MinimumSize = new Size(940, 600);
+        ClientSize = new Size(1240, 760);
+        MinimumSize = new Size(1060, 640);
         ShowInTaskbar = true;
+        BackColor = UiTheme.Canvas;
+        Font = UiTheme.Ui(9f);
+
+        _pages = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Canvas };
+        _captureState = new Label
+        {
+            AutoSize = true,
+            Font = UiTheme.Ui(8.5f),
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Margin = new Padding(14, 6, 10, 2)
+        };
+        _pauseButton = new Button
+        {
+            Height = 34,
+            Dock = DockStyle.Top,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = UiTheme.NavySoft,
+            ForeColor = Color.White,
+            Font = UiTheme.Ui(9f, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(14, 0, 8, 0)
+        };
+        _pauseButton.FlatAppearance.BorderSize = 0;
+        _pauseButton.Click += (_, _) => ToggleCapture();
 
         _identity = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(15, 23, 42),
+            Font = UiTheme.Ui(12f, FontStyle.Bold),
+            ForeColor = UiTheme.Text,
             Margin = new Padding(12, 10, 3, 3)
         };
 
         var refresh = new Button { Text = "Refresh", AutoSize = true, MinimumSize = new Size(92, 30) };
+        UiTheme.Secondary(refresh);
         refresh.Click += (_, _) => _ = RefreshAsync(forceDevice: true);
 
         var header = new FlowLayoutPanel
@@ -102,7 +160,8 @@ public sealed class DashboardForm : Form
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(8, 6, 8, 2)
+            BackColor = UiTheme.Surface,
+            Padding = new Padding(14, 8, 14, 4)
         };
         header.Controls.Add(_identity);
         header.Controls.Add(refresh);
@@ -130,91 +189,122 @@ public sealed class DashboardForm : Form
         kpis.Controls.Add(KpiCard("Needs review", _kpiReview), 2, 0);
         kpis.Controls.Add(KpiCard("Today's total", _kpiTotal), 3, 0);
 
-        _chart = new HourlyChart
-        {
-            Dock = DockStyle.Fill,
-            Margin = new Padding(12, 6, 12, 6)
-        };
+        _chart = new HourlyChart { Dock = DockStyle.Fill };
 
-        var chartHost = new GroupBox
+        var chartHost = new CardPanel
         {
-            Text = "Fiscalised receipts by hour (today)",
             Dock = DockStyle.Top,
-            Height = 150,
-            Padding = new Padding(8),
-            Margin = new Padding(10, 2, 10, 4)
+            Height = 166,
+            Margin = new Padding(14, 4, 14, 4),
+            Padding = new Padding(14, 10, 14, 10)
         };
+        var chartTitle = UiTheme.Heading("Fiscalised receipts by hour (today)");
+        chartTitle.Dock = DockStyle.Top;
+        chartTitle.Font = UiTheme.Ui(10.5f, FontStyle.Bold);
         chartHost.Controls.Add(_chart);
+        chartHost.Controls.Add(chartTitle);
 
-        _recentFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170 };
+        _recentFilter = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Width = 170,
+            Font = UiTheme.Ui(9f)
+        };
         _recentFilter.Items.AddRange(new object[] { "All jobs", "Needs review", "Failures", "Fiscalised" });
         _recentFilter.SelectedIndex = 0;
         _recentFilter.SelectedIndexChanged += (_, _) => FillRecent();
 
-        _recentCount = new Label { AutoSize = true, ForeColor = MutedColor, Margin = new Padding(10, 8, 3, 3) };
+        _recentCount = UiTheme.Subheading("");
+        _recentCount.Margin = new Padding(14, 9, 3, 3);
+
+        var openWorklist = new Button { Text = "Open worklist →", AutoSize = true };
+        UiTheme.Ghost(openWorklist);
+        openWorklist.Click += (_, _) => OpenJobs();
 
         var recentToolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(6, 4, 6, 2)
+            BackColor = UiTheme.Surface,
+            Padding = new Padding(12, 6, 12, 2)
         };
-        recentToolbar.Controls.Add(new Label { Text = "Show:", AutoSize = true, Margin = new Padding(3, 8, 6, 3) });
+        recentToolbar.Controls.Add(UiTheme.SectionLabel("Show"));
         recentToolbar.Controls.Add(_recentFilter);
         recentToolbar.Controls.Add(_recentCount);
+        recentToolbar.Controls.Add(openWorklist);
 
-        _recent = new ListView
+        _recent = new DataGridView
         {
             Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            GridLines = true,
-            MultiSelect = false,
-            HideSelection = false
+            AutoGenerateColumns = false,
+            AllowUserToResizeRows = false
         };
-        _recent.Columns.Add("Updated", 135);
-        _recent.Columns.Add("Invoice", 150);
-        _recent.Columns.Add("Type", 90);
-        _recent.Columns.Add("Status", 130);
-        _recent.Columns.Add("Total", 100, HorizontalAlignment.Right);
-        _recent.Columns.Add("Print", 100);
-        _recent.DoubleClick += (_, _) => OpenJobs();
-
-        var recentHost = new GroupBox
+        UiTheme.StyleGrid(_recent);
+        _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Updated", Width = 128 });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Invoice", Width = 150 });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Type", Width = 78 });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Status", Width = 124 });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Text = "Recent fiscalisation jobs (double-click to open the jobs window)",
-            Dock = DockStyle.Fill,
-            Padding = new Padding(8),
-            Margin = new Padding(10, 4, 6, 8)
+            HeaderText = "Total",
+            Width = 104,
+            DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
+        });
+        _recent.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Print", Width = 104 });
+        _recent.CellDoubleClick += (_, _) => OpenJobs();
+        _recent.CellPainting += (_, e) =>
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex == RecentStatus && e.Graphics is { } graphics &&
+                e.Value is LedgerStatus status)
+            {
+                e.PaintBackground(e.CellBounds, true);
+                var pill = UiTheme.Status(status);
+                UiTheme.PaintPill(graphics, e.CellBounds, pill.Text, pill.Fore, pill.Back);
+                e.Handled = true;
+            }
         };
+
+        var recentHost = new CardPanel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(14, 4, 14, 8),
+            Padding = new Padding(8)
+        };
+        var recentTitle = UiTheme.Heading("Recent fiscalisation jobs");
+        recentTitle.Dock = DockStyle.Top;
+        recentTitle.Font = UiTheme.Ui(10.5f, FontStyle.Bold);
+        recentTitle.Padding = new Padding(6, 2, 0, 6);
         recentHost.Controls.Add(_recent);
         recentHost.Controls.Add(recentToolbar);
+        recentHost.Controls.Add(recentTitle);
 
         _dayTitle = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(15, 23, 42),
+            Font = UiTheme.Ui(10.5f, FontStyle.Bold),
+            ForeColor = UiTheme.Text,
             Margin = new Padding(8, 6, 3, 2)
         };
         _dayMeta = new Label { AutoSize = true, ForeColor = MutedColor, Margin = new Padding(8, 2, 3, 2) };
         _dayTimer = new Label
         {
             AutoSize = true,
-            Font = new Font("Consolas", 12f),
-            ForeColor = Color.FromArgb(15, 23, 42),
+            Font = UiTheme.Mono(12f),
+            ForeColor = UiTheme.Text,
             Margin = new Padding(8, 2, 3, 6)
         };
 
-        var dayCard = new GroupBox
+        var dayCard = new CardPanel
         {
-            Text = "Fiscal day",
             Dock = DockStyle.Top,
-            Height = 118,
-            Padding = new Padding(6),
-            Margin = new Padding(6, 4, 10, 4)
+            Height = 126,
+            Margin = new Padding(14, 4, 14, 4),
+            Padding = new Padding(12, 10, 12, 8)
         };
+        var dayHeading = UiTheme.Heading("Fiscal day");
+        dayHeading.Dock = DockStyle.Top;
+        dayHeading.Font = UiTheme.Ui(10.5f, FontStyle.Bold);
         var dayStack = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -226,14 +316,17 @@ public sealed class DashboardForm : Form
         dayStack.Controls.Add(_dayMeta);
         dayStack.Controls.Add(_dayTimer);
         dayCard.Controls.Add(dayStack);
+        dayCard.Controls.Add(dayHeading);
 
         _checkFdms = CheckLabel();
         _checkQueue = CheckLabel();
         _checkReview = CheckLabel();
 
         _openDay = new Button { Text = "Open fiscal day…", AutoSize = true, Enabled = false };
+        UiTheme.Secondary(_openDay);
         _openDay.Click += (_, _) => _ = OpenDayAsync();
         _closeDay = new Button { Text = "Close fiscal day…", AutoSize = true, Enabled = false };
+        UiTheme.Secondary(_closeDay);
         _closeDay.Click += (_, _) => _ = CloseDayAsync();
 
         var dayButtons = new FlowLayoutPanel
@@ -245,13 +338,16 @@ public sealed class DashboardForm : Form
         dayButtons.Controls.Add(_closeDay);
         dayButtons.Controls.Add(_openDay);
 
-        var checklist = new GroupBox
+        var checklist = new CardPanel
         {
-            Text = "Close-day checks",
             Dock = DockStyle.Fill,
-            Padding = new Padding(8),
-            Margin = new Padding(6, 4, 10, 8)
+            Margin = new Padding(14, 4, 14, 8),
+            Padding = new Padding(12, 10, 12, 8)
         };
+        var checkTitle = UiTheme.Heading("Close-day checks");
+        checkTitle.Dock = DockStyle.Top;
+        checkTitle.Font = UiTheme.Ui(10.5f, FontStyle.Bold);
+        checkTitle.Margin = new Padding(0, 0, 0, 6);
         var checkStack = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -259,16 +355,17 @@ public sealed class DashboardForm : Form
             RowCount = 3,
             Padding = new Padding(4)
         };
-        checkStack.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70f));
+        checkStack.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62f));
         checkStack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        checkStack.Controls.Add(new Label { Text = "FDMS", AutoSize = true, ForeColor = MutedColor }, 0, 0);
+        checkStack.Controls.Add(UiTheme.SectionLabel("FDMS"), 0, 0);
         checkStack.Controls.Add(_checkFdms, 1, 0);
-        checkStack.Controls.Add(new Label { Text = "Queue", AutoSize = true, ForeColor = MutedColor }, 0, 1);
+        checkStack.Controls.Add(UiTheme.SectionLabel("Queue"), 0, 1);
         checkStack.Controls.Add(_checkQueue, 1, 1);
-        checkStack.Controls.Add(new Label { Text = "Review", AutoSize = true, ForeColor = MutedColor }, 0, 2);
+        checkStack.Controls.Add(UiTheme.SectionLabel("Review"), 0, 2);
         checkStack.Controls.Add(_checkReview, 1, 2);
         checklist.Controls.Add(checkStack);
         checklist.Controls.Add(dayButtons);
+        checklist.Controls.Add(checkTitle);
 
         var side = new TableLayoutPanel
         {
@@ -276,7 +373,7 @@ public sealed class DashboardForm : Form
             ColumnCount = 1,
             RowCount = 2
         };
-        side.RowStyles.Add(new RowStyle(SizeType.Absolute, 126f));
+        side.RowStyles.Add(new RowStyle(SizeType.Absolute, 140f));
         side.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         side.Controls.Add(dayCard, 0, 0);
         side.Controls.Add(checklist, 0, 1);
@@ -298,14 +395,45 @@ public sealed class DashboardForm : Form
             ColumnCount = 1,
             RowCount = 2
         };
-        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 160f));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 180f));
         main.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         main.Controls.Add(chartHost, 0, 0);
         main.Controls.Add(content, 0, 1);
 
-        Controls.Add(main);
-        Controls.Add(kpis);
-        Controls.Add(header);
+        // The overview carries the day's numbers and a compact worklist; deeper work happens on
+        // the Jobs and Reports pages in the same shell.
+        var overview = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = UiTheme.Canvas
+        };
+        overview.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        overview.RowStyles.Add(new RowStyle(SizeType.Absolute, 92f));
+        overview.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        overview.Controls.Add(main, 0, 2);
+        overview.Controls.Add(kpis, 0, 1);
+        overview.Controls.Add(header, 0, 0);
+
+        var shell = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1
+        };
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 214f));
+        shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        shell.Controls.Add(_pages, 1, 0);
+        shell.Controls.Add(BuildSidebar(), 0, 0);
+        Controls.Add(shell);
+
+        _pageCache["Overview"] = overview;
+        _pages.Controls.Add(overview);
+        SelectPage(string.IsNullOrWhiteSpace(initialPage) ? "Overview" : initialPage!);
+
+        _server.ProcessingPauseChanged += OnProcessingPauseChanged;
+        UpdateCaptureState();
 
         _timer = new System.Windows.Forms.Timer { Interval = 10_000 };
         _timer.Tick += async (_, _) => await RefreshAsync();
@@ -317,6 +445,7 @@ public sealed class DashboardForm : Form
 
         FormClosed += (_, _) =>
         {
+            _server.ProcessingPauseChanged -= OnProcessingPauseChanged;
             _cts.Cancel();
             _timer.Stop();
             _timer.Dispose();
@@ -328,27 +457,295 @@ public sealed class DashboardForm : Form
         _ = RefreshAsync(forceDevice: true);
     }
 
+    /// <summary>Used by the tray to open a specific page, including first-run Settings.</summary>
+    public void NavigateTo(string page) => SelectPage(page);
+
+    private Control BuildSidebar()
+    {
+        var sidebar = new Panel
+        {
+            Dock = DockStyle.Left,
+            Width = 214,
+            BackColor = UiTheme.Navy
+        };
+
+        var title = new Label
+        {
+            Text = "FiscalStack",
+            Dock = DockStyle.Top,
+            Height = 44,
+            Font = UiTheme.Ui(14f, FontStyle.Bold),
+            ForeColor = Color.White,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(16, 0, 8, 0)
+        };
+        var subtitle = new Label
+        {
+            Text = "PrintInterceptor console",
+            Dock = DockStyle.Top,
+            Height = 28,
+            ForeColor = Color.FromArgb(148, 163, 184),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(16, 0, 8, 0)
+        };
+
+        var nav = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = true,
+            Padding = new Padding(8, 10, 8, 8)
+        };
+        AddNav(nav, "Overview", "Overview");
+        AddNav(nav, "Parse rules", "Parse rules");
+        AddNav(nav, "Settings", "Settings");
+        AddNav(nav, "Jobs", page: "Jobs");
+        AddNav(nav, "Fiscal status", tool: "fiscal-status");
+        AddNav(nav, "Reports", page: "Reports");
+        AddNav(nav, "Capture layout", tool: "capture");
+        AddNav(nav, "Files & tools", "Tools");
+
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 126 };
+        var updates = new Button
+        {
+            Text = "Check for updates",
+            Dock = DockStyle.Top,
+            Height = 32,
+            FlatStyle = FlatStyle.Flat,
+            Font = UiTheme.Ui(9f),
+            BackColor = UiTheme.NavySoft,
+            ForeColor = Color.FromArgb(203, 213, 225),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(14, 0, 8, 0)
+        };
+        updates.FlatAppearance.BorderSize = 0;
+        updates.Click += (_, _) => RunTool("updates");
+        footer.Controls.Add(_pauseButton);
+        footer.Controls.Add(updates);
+        footer.Controls.Add(_captureState);
+
+        sidebar.Controls.Add(nav);
+        sidebar.Controls.Add(footer);
+        sidebar.Controls.Add(subtitle);
+        sidebar.Controls.Add(title);
+        return sidebar;
+    }
+
+    private void AddNav(FlowLayoutPanel nav, string label, string? page = null, string? tool = null)
+    {
+        var button = new Button
+        {
+            Text = label,
+            Width = 188,
+            Height = 40,
+            FlatStyle = FlatStyle.Flat,
+            Font = UiTheme.Ui(9.5f, FontStyle.Bold),
+            BackColor = UiTheme.NavySoft,
+            ForeColor = Color.FromArgb(226, 232, 240),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Padding = new Padding(14, 0, 8, 0),
+            Margin = new Padding(0, 0, 0, 4)
+        };
+        button.FlatAppearance.BorderSize = 0;
+        button.Click += (_, _) =>
+        {
+            if (page is not null)
+            {
+                SelectPage(page);
+            }
+            else if (tool is not null)
+            {
+                RunTool(tool);
+            }
+        };
+        nav.Controls.Add(button);
+        if (page is not null)
+        {
+            _navButtons[page] = button;
+        }
+    }
+
+    private void SelectPage(string name)
+    {
+        if (!_pageCache.TryGetValue(name, out var page))
+        {
+            page = CreatePage(name);
+            _pageCache[name] = page;
+            _pages.Controls.Add(page);
+        }
+
+        foreach (Control existing in _pages.Controls)
+        {
+            existing.Visible = existing == page;
+        }
+
+        page.BringToFront();
+        _currentPage = name;
+        foreach (var (key, button) in _navButtons)
+        {
+            var selected = key == name;
+            button.BackColor = selected ? UiTheme.Accent : UiTheme.NavySoft;
+            button.ForeColor = Color.White;
+        }
+
+        if (name == "Overview")
+        {
+            _ = RefreshAsync();
+        }
+    }
+
+    private Control CreatePage(string name) => name switch
+    {
+        "Settings" => CreateSettingsPage(),
+        "Parse rules" => new ParseRulesPage(_config, _pipeline, _log) { Dock = DockStyle.Fill },
+        "Jobs" => CreateJobsPage(),
+        "Reports" => CreateReportsPage(),
+        "Tools" => CreateToolsPage(),
+        _ => new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Canvas }
+    };
+
+    private Control CreateJobsPage()
+    {
+        var form = _actions.CreateJobsForm is { } factory
+            ? factory()
+            : new JobsForm(_ledger, _snapshots, _pipeline, _jobs, _log);
+        form.EmbeddedMode = true;
+        form.CloseRequested += (_, _) => SelectPage("Overview");
+        return form;
+    }
+
+    private Control CreateReportsPage()
+    {
+        if (_actions.CreateReportForm is not { } factory)
+        {
+            return new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Canvas };
+        }
+
+        var form = factory();
+        form.EmbeddedMode = true;
+        form.CloseRequested += (_, _) => SelectPage("Overview");
+        return form;
+    }
+
+    private Control CreateSettingsPage()
+    {
+        var settings = _actions.CreateSettingsForm();
+        settings.EmbeddedMode = true;
+        settings.SettingsSaved += (_, _) => _ = RefreshAsync();
+        settings.CloseRequested += (_, _) => SelectPage("Overview");
+        return settings;
+    }
+
+    private Control CreateToolsPage()
+    {
+        var page = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = UiTheme.Canvas,
+            AutoScroll = true,
+            Padding = new Padding(24)
+        };
+        var stack = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false
+        };
+
+        void Group(string text)
+        {
+            var label = UiTheme.Heading(text);
+            label.Font = UiTheme.Ui(11f, FontStyle.Bold);
+            label.Margin = new Padding(0, 12, 0, 6);
+            stack.Controls.Add(label);
+        }
+
+        void Action(string text, string id)
+        {
+            var button = new Button
+            {
+                Text = text,
+                Width = 330,
+                Height = 36,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 8, 0),
+                Margin = new Padding(0, 2, 8, 2)
+            };
+            UiTheme.Secondary(button);
+            button.Click += (_, _) => RunTool(id);
+            stack.Controls.Add(button);
+        }
+
+        Group("FiscalStack");
+        Action("Sync offline receipts now", "sync");
+        Action("Reconcile unknown receipts now", "reconcile");
+        Action("Test connection", "test-connection");
+        Group("Receipt parsing");
+        Action("Import receipt parse profile…", "import-profile");
+        Action("Open parse profiles folder", "profiles");
+        Action("Capture receipt layout from a job…", "capture");
+        Group("Files");
+        Action("Open configuration file", "open-config");
+        Action("Open data folder", "data");
+        Action("Open received files folder", "received");
+        Action("Open fiscalised invoices folder", "fiscalised");
+        Action("Open logs folder", "logs");
+        Action("Open current log file", "current-log");
+        Group("Windows");
+        Action("Start with Windows", "autostart");
+
+        page.Controls.Add(stack);
+        return page;
+    }
+
+    private void RunTool(string id)
+    {
+        _actions.RunTool(id);
+        if (_currentPage == "Overview")
+        {
+            _ = RefreshAsync();
+        }
+    }
+
+    private void ToggleCapture()
+    {
+        RunTool("toggle-capture");
+        UpdateCaptureState();
+    }
+
+    private void OnProcessingPauseChanged(object? sender, EventArgs e) => UpdateCaptureState();
+
+    private void UpdateCaptureState()
+    {
+        if (IsHandleCreated && InvokeRequired)
+        {
+            BeginInvoke(new Action(UpdateCaptureState));
+            return;
+        }
+
+        var paused = _server.IsProcessingPaused;
+        _captureState.Text = paused ? "Capture: PAUSED — jobs are queued" : "Capture: running";
+        _captureState.ForeColor = paused ? Color.FromArgb(253, 224, 71) : Color.FromArgb(167, 243, 208);
+        _pauseButton.Text = paused ? "Resume capture" : "Pause capture";
+    }
+
     private static Label KpiValue() => new()
     {
         AutoSize = true,
-        Font = new Font("Segoe UI", 15f, FontStyle.Bold),
-        ForeColor = Color.FromArgb(15, 23, 42),
+        Font = UiTheme.Ui(15f, FontStyle.Bold),
+        ForeColor = UiTheme.Text,
         Margin = new Padding(10, 2, 3, 6)
     };
 
-    private static Panel KpiCard(string title, Label value)
+    private static CardPanel KpiCard(string title, Label value)
     {
-        var card = new Panel
+        var card = new CardPanel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.White,
             Margin = new Padding(4, 2, 4, 2),
-            Padding = new Padding(2)
-        };
-        card.Paint += (_, e) =>
-        {
-            using var pen = new Pen(Color.FromArgb(226, 232, 240));
-            e.Graphics.DrawRectangle(pen, 0, 0, card.Width - 1, card.Height - 1);
+            Padding = new Padding(10, 8, 10, 6)
         };
 
         var stack = new FlowLayoutPanel
@@ -358,13 +755,9 @@ public sealed class DashboardForm : Form
             WrapContents = false,
             AutoSize = true
         };
-        stack.Controls.Add(new Label
-        {
-            Text = title,
-            AutoSize = true,
-            ForeColor = MutedColor,
-            Margin = new Padding(10, 8, 3, 0)
-        });
+        var label = UiTheme.SectionLabel(title);
+        label.Margin = new Padding(0, 0, 3, 2);
+        stack.Controls.Add(label);
         stack.Controls.Add(value);
         card.Controls.Add(stack);
         return card;
@@ -373,6 +766,7 @@ public sealed class DashboardForm : Form
     private static Label CheckLabel() => new()
     {
         AutoSize = true,
+        Font = UiTheme.Ui(9f),
         ForeColor = MutedColor,
         Margin = new Padding(3, 4, 3, 4)
     };
@@ -403,7 +797,7 @@ public sealed class DashboardForm : Form
                 .GroupBy(entry => string.IsNullOrWhiteSpace(entry.Currency) ? "—" : entry.Currency)
                 .Select(group => $"{group.Sum(entry => entry.Total):0.00} {group.Key}");
             _kpiTotal.Text = string.Join(" / ", totals.DefaultIfEmpty("—"));
-            _kpiTotal.Font = new Font(_kpiTotal.Font.FontFamily, totals.Any() && _kpiTotal.Text.Length > 22 ? 10.5f : 15f, FontStyle.Bold);
+            _kpiTotal.Font = UiTheme.Ui(totals.Any() && _kpiTotal.Text.Length > 22 ? 10.5f : 15f, FontStyle.Bold);
 
             var hours = new int[24];
             foreach (var entry in fiscalisedToday)
@@ -465,38 +859,22 @@ public sealed class DashboardForm : Form
             _ => true
         }).Take(50).ToList();
 
-        _recent.BeginUpdate();
-        _recent.Items.Clear();
+        _recent.SuspendLayout();
+        _recent.Rows.Clear();
         foreach (var entry in shown)
         {
-            var item = new ListViewItem(entry.UpdatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss"))
-            {
-                ForeColor = entry.Status switch
-                {
-                    LedgerStatus.Rejected or LedgerStatus.AmbiguousFailure => BadColor,
-                    LedgerStatus.NeedsReview or LedgerStatus.InFlight => WarnColor,
-                    _ => Color.FromArgb(15, 23, 42)
-                }
-            };
-            item.SubItems.Add(entry.InvoiceNumber ?? "—");
-            item.SubItems.Add(string.Equals(entry.TransactionType, "CreditNote", StringComparison.OrdinalIgnoreCase) ? "Credit" : "Sale");
-            item.SubItems.Add(entry.Status switch
-            {
-                LedgerStatus.InFlight => "In flight",
-                LedgerStatus.Fiscalised => "Fiscalised",
-                LedgerStatus.FiscalisedOffline => "Offline — queued",
-                LedgerStatus.Rejected => "Rejected",
-                LedgerStatus.NeedsReview => "Needs review",
-                LedgerStatus.AmbiguousFailure => "Unknown outcome",
-                _ => entry.Status.ToString()
-            });
-            item.SubItems.Add($"{entry.Currency} {entry.Total:0.00}");
-            item.SubItems.Add(entry.PrintStatus);
-            _recent.Items.Add(item);
+            var index = _recent.Rows.Add(
+                entry.UpdatedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm"),
+                entry.InvoiceNumber ?? "—",
+                string.Equals(entry.TransactionType, "CreditNote", StringComparison.OrdinalIgnoreCase) ? "Credit" : "Sale",
+                entry.Status,
+                $"{entry.Currency} {entry.Total:0.00}".Trim(),
+                entry.PrintStatus);
+            _recent.Rows[index].Tag = entry;
         }
 
-        _recent.EndUpdate();
-        _recentCount.Text = $"{shown.Count} shown";
+        _recent.ResumeLayout();
+        _recentCount.Text = $"{shown.Count} of {entries.Count}";
     }
 
     private void UpdateChecklist(IReadOnlyList<LedgerEntry> entries)
@@ -670,9 +1048,8 @@ public sealed class DashboardForm : Form
 
     private void OpenJobs()
     {
-        // The jobs window owns reprint and per-job detail; the dashboard stays a read-only summary.
-        using var form = new JobsForm(_ledger, _snapshots, _pipeline, _jobs, _log);
-        form.ShowDialog(this);
+        // The worklist is now a page in the same console, not a second window.
+        SelectPage("Jobs");
         _ = RefreshAsync();
     }
 
@@ -684,7 +1061,7 @@ public sealed class DashboardForm : Form
         public HourlyChart()
         {
             DoubleBuffered = true;
-            BackColor = Color.White;
+            BackColor = UiTheme.Surface;
         }
 
         public void SetCounts(int[] counts)
@@ -705,10 +1082,10 @@ public sealed class DashboardForm : Form
             var bottom = height - 18;
             var barWidth = Math.Max(2, (width - 24) / 24 - 3);
 
-            using var barBrush = new SolidBrush(Color.FromArgb(11, 122, 90));
-            using var axisPen = new Pen(Color.FromArgb(226, 232, 240));
+            using var barBrush = new SolidBrush(UiTheme.Success);
+            using var axisPen = new Pen(UiTheme.Border);
             using var labelBrush = new SolidBrush(MutedColor);
-            using var labelFont = new Font("Segoe UI", 7.5f);
+            using var labelFont = UiTheme.Ui(7.5f);
 
             graphics.DrawLine(axisPen, 8, bottom, width - 8, bottom);
 

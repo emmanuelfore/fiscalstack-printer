@@ -119,36 +119,16 @@ public sealed class TrayApplicationContext : ApplicationContext
         _capturePauseItem = new ToolStripMenuItem("Pause capture", null, ToggleCapturePause);
         _dashboardItem = new ToolStripMenuItem("Show Dashboard", null, (_, _) => ShowDashboard());
 
+        // The operator console owns the detail now. The tray stays deliberately short:
+        // status (plus urgent alerts), the dashboard, capture pause and autostart.
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
-        menu.Items.Add(_dayItem);
-        menu.Items.Add(_openDayItem);
-        menu.Items.Add(_closeDayItem);
-        menu.Items.Add(_queueItem);
         menu.Items.Add(_reviewItem);
         menu.Items.Add(_failuresItem);
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_dashboardItem);
         menu.Items.Add(_capturePauseItem);
-        menu.Items.Add(new ToolStripMenuItem("Check for updates…", null, CheckForUpdates));
-        menu.Items.Add(new ToolStripMenuItem("Sync offline receipts now", null, SyncNow));
-        menu.Items.Add(new ToolStripMenuItem("Reconcile unknown receipts now", null, ReconcileNow));
-        menu.Items.Add(new ToolStripMenuItem("Fiscal status…", null, (_, _) => ShowFiscalStatus()));
-        menu.Items.Add(new ToolStripMenuItem("Fiscalisation jobs…", null, (_, _) => ShowJobs()));
-        menu.Items.Add(new ToolStripMenuItem("Daily Z-shift summary…", null, (_, _) => ShowDayReport()));
-        menu.Items.Add(new ToolStripMenuItem("Test connection", null, TestConnection));
-        menu.Items.Add(new ToolStripMenuItem("Settings…", null, (_, _) => ShowSettings()));
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Open configuration file", null, OpenConfig));
-        menu.Items.Add(new ToolStripMenuItem("Open received files folder", null, OpenReceivedFiles));
-        menu.Items.Add(new ToolStripMenuItem("Open fiscalised invoices folder", null, OpenFiscalisedInvoices));
-        menu.Items.Add(new ToolStripMenuItem("Open logs folder", null, OpenLogs));
-        menu.Items.Add(new ToolStripMenuItem("Open current log file", null, OpenCurrentLogFile));
-        menu.Items.Add(new ToolStripMenuItem("Open data folder", null, OpenData));
-        menu.Items.Add(new ToolStripMenuItem("Import receipt parse profile…", null, ImportParseProfile));
-        menu.Items.Add(new ToolStripMenuItem("Capture receipt layout from a job…", null, (_, _) => ShowCapture()));
-        menu.Items.Add(new ToolStripMenuItem("Open parse profiles folder", null, OpenParseProfiles));
         menu.Items.Add(new ToolStripSeparator());
 
         _autostartItem = new ToolStripMenuItem("Start with Windows", null, ToggleAutostart)
@@ -184,7 +164,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             {
                 setupTimer.Stop();
                 setupTimer.Dispose();
-                ShowSettings();
+                ShowDashboard("Settings");
             };
             setupTimer.Start();
         }
@@ -789,21 +769,27 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
+        // Applying a captured profile edits the same config the running parser reads.
+        _pipeline.ReloadParser();
         _deviceStatusAt = DateTimeOffset.MinValue;
         _ = RefreshAsync(forceDevice: false);
     }
 
     /// <summary>
-    /// The one-page operator view copied from FiscalBridge: today's KPIs, hourly activity, recent
-    /// jobs and the fiscal-day/close-check panel. It reads the same ledger the pipeline writes.
-    /// Unlike the other windows it stays open beside the till: the menu item and a double-click
-    /// on the icon toggle it between shown and hidden, the way FiscalBridge does.
+    /// The operator console is the only place with detail now. It stays open beside the till;
+    /// the tray item and icon double-click toggle it, and first-run opens straight to Settings.
     /// </summary>
-    private void ShowDashboard()
+    private void ShowDashboard(string? initialPage = null)
     {
         if (_dashboard is { IsDisposed: false } dashboard)
         {
-            if (dashboard.Visible)
+            if (initialPage is not null)
+            {
+                dashboard.NavigateTo(initialPage);
+                dashboard.Show();
+                dashboard.Activate();
+            }
+            else if (dashboard.Visible)
             {
                 dashboard.Hide();
             }
@@ -815,7 +801,14 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         else
         {
-            _dashboard = new DashboardForm(_config, _client, _company, _ledger, _sync, _snapshots, _pipeline, _jobs, _log);
+            var actions = new DashboardActions(
+                () => new SettingsForm(_config, _log, _offline, _secrets),
+                RunDashboardTool,
+                () => new JobsForm(_ledger, _snapshots, _pipeline, _jobs, _log),
+                () => new DayReportForm(_dayReports, _config.ResolveDataDirectory()));
+            _dashboard = new DashboardForm(
+                _config, _client, _company, _ledger, _sync, _snapshots, _pipeline, _jobs, _log,
+                actions, _server, initialPage ?? "Overview");
             _dashboard.FormClosed += (_, _) =>
             {
                 _dashboard = null;
@@ -827,6 +820,90 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         _dashboardItem.Text = _dashboard is { Visible: true } ? "Hide Dashboard" : "Show Dashboard";
+    }
+
+    /// <summary>
+    /// One entry point for every action the console sidebar can trigger. The tray menu no longer
+    /// duplicates these; only genuinely urgent alerts remain visible beside the dashboard toggle.
+    /// </summary>
+    private bool TryOpenDashboardPage(string page)
+    {
+        if (_dashboard is not { IsDisposed: false } dashboard)
+        {
+            return false;
+        }
+
+        dashboard.NavigateTo(page);
+        dashboard.Show();
+        dashboard.Activate();
+        return true;
+    }
+
+    private void RunDashboardTool(string tool)
+    {
+        switch (tool)
+        {
+            case "toggle-capture":
+                ToggleCapturePause(null, EventArgs.Empty);
+                break;
+            case "jobs":
+                if (!TryOpenDashboardPage("Jobs"))
+                {
+                    ShowJobs();
+                }
+                break;
+            case "fiscal-status":
+                ShowFiscalStatus();
+                break;
+            case "day-report":
+                if (!TryOpenDashboardPage("Reports"))
+                {
+                    ShowDayReport();
+                }
+                break;
+            case "capture":
+                ShowCapture();
+                break;
+            case "updates":
+                CheckForUpdates(null, EventArgs.Empty);
+                break;
+            case "sync":
+                SyncNow(null, EventArgs.Empty);
+                break;
+            case "reconcile":
+                ReconcileNow(null, EventArgs.Empty);
+                break;
+            case "test-connection":
+                TestConnection(null, EventArgs.Empty);
+                break;
+            case "import-profile":
+                ImportParseProfile(null, EventArgs.Empty);
+                break;
+            case "profiles":
+                OpenParseProfiles(null, EventArgs.Empty);
+                break;
+            case "open-config":
+                OpenConfig(null, EventArgs.Empty);
+                break;
+            case "data":
+                OpenData(null, EventArgs.Empty);
+                break;
+            case "received":
+                OpenReceivedFiles(null, EventArgs.Empty);
+                break;
+            case "fiscalised":
+                OpenFiscalisedInvoices(null, EventArgs.Empty);
+                break;
+            case "logs":
+                OpenLogs(null, EventArgs.Empty);
+                break;
+            case "current-log":
+                OpenCurrentLogFile(null, EventArgs.Empty);
+                break;
+            case "autostart":
+                ToggleAutostart(null, EventArgs.Empty);
+                break;
+        }
     }
 
     /// <summary>
@@ -968,38 +1045,6 @@ public sealed class TrayApplicationContext : ApplicationContext
         ShellOpen.Path(newest.FullName);
     }
 
-    private void ShowSettings()
-    {
-        var offlineBefore = _config.Offline.Enabled;
-        using var form = new SettingsForm(_config, _log, _offline, _secrets);
-        if (form.ShowDialog() != DialogResult.OK)
-        {
-            return;
-        }
-
-        // The client reads the key and endpoint from the shared config on every
-        // request, so a change is already live; drop the cached connectivity probe
-        // so the tray reflects the new credential straight away.
-        _deviceStatusAt = DateTimeOffset.MinValue;
-        _ = RefreshAsync(forceDevice: true);
-
-        if (offlineBefore != _config.Offline.Enabled)
-        {
-            Balloon(
-                "Settings saved",
-                "The endpoint and API key apply to the next receipt. Changing whether offline " +
-                "signing is enabled needs a restart of PrintInterceptor.",
-                ToolTipIcon.Warning);
-            return;
-        }
-
-        Balloon(
-            "Settings saved",
-            "The endpoint and API key apply to the next receipt; printing changes are already " +
-            "in effect. No restart needed.",
-            ToolTipIcon.Info);
-    }
-
     private void OpenConfig(object? sender, EventArgs e)
     {
         if (string.IsNullOrWhiteSpace(_config.ConfigPath) || !File.Exists(_config.ConfigPath))
@@ -1042,8 +1087,8 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     /// <summary>
     /// Installs a profile file received from another till. Importing deliberately does
-    /// not apply it: the operator picks the layout in Settings, so a wrong file cannot
-    /// silently change what the next receipt is read as.
+    /// not apply it: the operator picks the layout on the console's Parse rules page, so a
+    /// wrong file cannot silently change what the next receipt is read as.
     /// </summary>
     private void ImportParseProfile(object? sender, EventArgs e)
     {
@@ -1063,12 +1108,12 @@ public sealed class TrayApplicationContext : ApplicationContext
             _log.Info($"Imported parse profile '{Path.GetFileNameWithoutExtension(installed)}' to {installed}.");
             if (MessageBox.Show(
                     $"Installed {Path.GetFileName(installed)}.\n\n" +
-                    "Open Settings and pick it under Receipt parsing profile to use its rules.",
+                    "Open Parse rules and pick it under Installed profiles to use its rules.",
                     "Parse profile imported",
                     MessageBoxButtons.OKCancel,
                     MessageBoxIcon.Question) == DialogResult.OK)
             {
-                ShowSettings();
+                ShowDashboard("Parse rules");
             }
         }
         catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)

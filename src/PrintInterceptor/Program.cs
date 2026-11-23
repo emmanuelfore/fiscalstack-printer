@@ -120,7 +120,7 @@ public static class Program
 
         if (!resolution.Found)
         {
-            log.Warn("No API key is configured. Register it with --register-key (or open Settings in the tray); " +
+            log.Warn("No API key is configured. Register it with --register-key (or open Settings in the console); " +
                      "jobs will be held for review until then.");
         }
         else
@@ -248,6 +248,7 @@ public static class Program
             return 1;
         }
 
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -284,6 +285,7 @@ public static class Program
         SecretStore secrets,
         bool highlightFirstRun)
     {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 

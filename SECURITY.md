@@ -15,7 +15,7 @@ minimal reproduction with secrets redacted.
 ## Secret handling
 
 - Register the FiscalStack API key with `PrintInterceptor.exe --register-key`
-  (hidden prompt) or the tray **Settings → API key**. The key is never passed on
+  (hidden prompt) or the console's **Settings → API key**. The key is never passed on
   a command line or stored in `config.json`.
 - The API key and (when offline signing is enabled) the ZIMRA device private key
   are `LocalMachine` DPAPI blobs under `<config folder>\secrets\`, each with an

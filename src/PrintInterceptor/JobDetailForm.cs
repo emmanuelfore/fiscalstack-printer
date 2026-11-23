@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Text.Json;
 using System.Windows.Forms;
@@ -18,37 +17,44 @@ public sealed class JobDetailForm : Form
 
     private readonly LedgerEntry _entry;
     private readonly JobStore _jobs;
+    private readonly PrintSnapshotStore _snapshots;
 
     public JobDetailForm(LedgerEntry entry, JobStore jobs, PrintSnapshotStore snapshots)
     {
         _entry = entry;
         _jobs = jobs;
+        _snapshots = snapshots;
 
         Text = $"Job {Short(entry.Hash)} — {entry.InvoiceNumber ?? "no invoice number"}";
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(860, 620);
-        MinimumSize = new Size(640, 420);
+        BackColor = UiTheme.Canvas;
+        Font = UiTheme.Ui(9f);
+        ClientSize = new Size(900, 640);
+        MinimumSize = new Size(680, 440);
 
-        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var tabs = new TabControl { Dock = DockStyle.Fill, Font = UiTheme.Ui(9f) };
         tabs.TabPages.Add(TextPage("Summary", Summary(entry, snapshots)));
         tabs.TabPages.Add(TextPage("Request sent", PrettyJson(jobs.LoadRequest(entry.SourceFile))
             ?? "(The request body was not retained. Turn storage.retainJobs on to keep it for review and reconciliation.)"));
         tabs.TabPages.Add(TextPage("Receipt text", jobs.LoadText(entry.SourceFile)
             ?? "(The decoded receipt text was not retained.)"));
 
-        var openJob = new Button { Text = "Open source job", AutoSize = true };
-        openJob.Enabled = entry.SourceFile is { Length: > 0 } file && File.Exists(file);
+        var openJob = new Button { Text = "Open stored document", AutoSize = true };
+        UiTheme.Secondary(openJob);
+        openJob.Enabled = FiscalDocumentActions.CanOpen(entry, snapshots, jobs);
         openJob.Click += (_, _) => OpenSourceJob();
         var close = new Button { Text = "Close", Width = 90, DialogResult = DialogResult.Cancel };
+        UiTheme.Secondary(close);
 
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
             FlowDirection = FlowDirection.RightToLeft,
-            Height = 46,
-            Padding = new Padding(10)
+            Height = 52,
+            BackColor = UiTheme.Surface,
+            Padding = new Padding(16, 8, 16, 8)
         };
         buttons.Controls.Add(close);
         buttons.Controls.Add(openJob);
@@ -68,9 +74,11 @@ public sealed class JobDetailForm : Form
             ReadOnly = true,
             ScrollBars = ScrollBars.Both,
             WordWrap = false,
-            BackColor = Color.FromArgb(248, 250, 252),
-            Font = new Font("Consolas", 9f),
-            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = UiTheme.Surface,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Mono(9f),
+            BorderStyle = BorderStyle.None,
+            Padding = new Padding(6),
             Text = content
         });
         return page;
@@ -109,7 +117,7 @@ public sealed class JobDetailForm : Form
         $"Print error..... {OrDash(entry.PrintError)}",
         $"Reason.......... {OrDash(entry.Error)}",
         $"Source job...... {OrDash(entry.SourceFile)}",
-        $"Reprint ready... {(snapshots.Exists(entry.Hash) ? "yes" : "no")}"
+        $"Fiscal copy ready... {(snapshots.ExistsDurable(entry.Hash) ? "yes" : "no")}"
     });
 
     /// <summary>Re-indents the retained request so an operator can read it; falls back to the raw body.</summary>
@@ -133,18 +141,10 @@ public sealed class JobDetailForm : Form
 
     private void OpenSourceJob()
     {
-        if (_entry.SourceFile is not { Length: > 0 } file || !File.Exists(file))
+        var path = FiscalDocumentActions.OpenablePath(_entry, _snapshots, _jobs);
+        if (path is not null)
         {
-            return;
-        }
-
-        try
-        {
-            Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "PrintInterceptor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ShellOpen.Path(path);
         }
     }
 

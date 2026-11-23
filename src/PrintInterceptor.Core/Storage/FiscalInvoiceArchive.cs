@@ -49,13 +49,7 @@ public sealed class FiscalInvoiceArchive
     {
         try
         {
-            var suffix = "-" + Short(hash) + ".json";
-            var path = Directory.Exists(_root)
-                ? Directory.EnumerateFiles(_root, "*" + suffix, SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc)
-                    .FirstOrDefault()
-                : null;
-
+            var path = FindByHash(hash, ".json");
             if (path is null)
             {
                 return null;
@@ -68,6 +62,17 @@ public sealed class FiscalInvoiceArchive
             _log.Error($"Could not read the archived fiscal invoice for {Short(hash)}", ex);
             return null;
         }
+    }
+
+    /// <summary>The archived text or JSON file for a job, for row-level Open actions.</summary>
+    public string? FindByHash(string hash, string extension)
+    {
+        var suffix = "-" + Short(hash) + extension;
+        return Directory.Exists(_root)
+            ? Directory.EnumerateFiles(_root, "*" + suffix, SearchOption.AllDirectories)
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault()
+            : null;
     }
 
     public bool Save(string hash, ReceiptPrintModel model)

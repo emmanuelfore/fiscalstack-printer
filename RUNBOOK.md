@@ -25,7 +25,8 @@ Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='PrintInter
 
 Healthy means: service **Running**, port listening, virtual printer present, no fresh
 `ERROR` lines in the current log, no `AmbiguousFailure` or stuck `InFlight` entries in the
-jobs screen, and the fiscal day/device shown by *Fiscal status…* matches FiscalStack.
+console's **Jobs** page, and the fiscal day/device shown by the console's *Fiscal status* page
+matches FiscalStack.
 
 The tray icon is green when the API is reachable and the offline queue is empty, amber when
 receipts are waiting to sync, red when the API is down or sync is paused.
@@ -82,7 +83,7 @@ allowing new sales — a rolled-back chain can collide with live counters.
 | `offline-failed\*.json` | Rejected receipts; never auto-retried. |
 | `offline-sync-pause.json` | Sync paused after a rejection. |
 
-3. Run *Sync offline receipts now* from the tray, or leave the service running (it retries
+3. Run *Sync offline receipts now* from the console's *Files & tools* page, or leave the service running (it retries
    every 60 seconds and tries once before each new sale). Watch the log for sync results and
    confirm the queue empties.
 4. If paused: reconcile the head receipt in FiscalStack first, then use *Resume offline sync*
@@ -145,7 +146,7 @@ Windows agent. The same check can be run on an elevated maintenance machine with
 4. If the service account changed, run `.\install-service.ps1 -Remove` then reinstall with
    `-ServiceCredential` (see below). Otherwise leave the service registration alone.
 5. Start the service and run the health checks, then print one test receipt end-to-end.
-   Applying a parse profile needs a restart before it takes effect.
+   Applying a parse profile in the console's **Parse rules** page rebuilds the live parser immediately; no restart is needed.
 
 Service install with a dedicated account (recommended):
 

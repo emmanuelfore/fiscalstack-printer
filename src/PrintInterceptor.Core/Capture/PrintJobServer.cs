@@ -67,12 +67,16 @@ public sealed class PrintJobServer : IAsyncDisposable
     /// </summary>
     public bool IsProcessingPaused => Volatile.Read(ref _processingPaused) == 1;
 
+    /// <summary>Raised when the operator pauses or resumes processing, so the tray and dashboard agree.</summary>
+    public event EventHandler? ProcessingPauseChanged;
+
     public void PauseProcessing()
     {
         if (Interlocked.Exchange(ref _processingPaused, 1) == 0)
         {
             _resumeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _log.Warn("Capture processing paused by the operator. Jobs are still captured and queue until resumed.");
+            ProcessingPauseChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -82,6 +86,7 @@ public sealed class PrintJobServer : IAsyncDisposable
         {
             _resumeGate.TrySetResult();
             _log.Info("Capture processing resumed. Queued jobs will now be fiscalised.");
+            ProcessingPauseChanged?.Invoke(this, EventArgs.Empty);
         }
     }
 

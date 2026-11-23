@@ -5,7 +5,7 @@ namespace PrintInterceptor;
 
 /// <summary>
 /// Opens a file or folder with the shell, reporting a failure in a message box instead
-/// of throwing. Shared by the tray menu and the settings window.
+/// of throwing. Shared by the operator console and the settings window.
 /// </summary>
 internal static class ShellOpen
 {
