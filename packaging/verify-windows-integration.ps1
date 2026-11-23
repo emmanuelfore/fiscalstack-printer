@@ -201,8 +201,12 @@ try {
         -ArgumentList "--status --json --service-name=`"$ServiceName`"" `
         -Wait -PassThru -NoNewWindow `
         -RedirectStandardOutput $statusOut -RedirectStandardError $statusErr
-    $statusText = if (Test-Path $statusOut) { (Get-Content -Path $statusOut -Raw).Trim() } else { "" }
-    $statusErrorText = if (Test-Path $statusErr) { (Get-Content -Path $statusErr -Raw).Trim() } else { "" }
+    # Start-Process creates both redirect files even when a stream is empty;
+    # Get-Content -Raw returns $null for a 0-byte file, so trim defensively.
+    $statusRaw = if (Test-Path $statusOut) { Get-Content -Path $statusOut -Raw } else { "" }
+    $statusErrorRaw = if (Test-Path $statusErr) { Get-Content -Path $statusErr -Raw } else { "" }
+    $statusText = if ($null -eq $statusRaw) { "" } else { $statusRaw.Trim() }
+    $statusErrorText = if ($null -eq $statusErrorRaw) { "" } else { $statusErrorRaw.Trim() }
     if ($statusProcess.ExitCode -ne 0) {
         throw "Status probe failed (exit $($statusProcess.ExitCode)): $statusText $statusErrorText"
     }
