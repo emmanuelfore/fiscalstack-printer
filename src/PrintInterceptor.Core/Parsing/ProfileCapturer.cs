@@ -132,6 +132,18 @@ public static class ProfileCapturer
         return new ProfileCapture(lines, asIs, suggested, suggestions, rules, notes);
     }
 
+    /// <summary>
+    /// Reads a receipt with the current rules plus a candidate profile's additions, without
+    /// touching the live configuration. The capture window's regression run uses this to try
+    /// the suggested rules over the till's recent jobs before anything is saved.
+    /// </summary>
+    public static ParseResult ParseWithRules(string text, ParseConfig current, ParseProfileRules rules)
+    {
+        var candidate = LayoutClone(current);
+        rules.ApplyTo(candidate);
+        return new ReceiptParser(candidate).Parse(text);
+    }
+
     private static readonly Dictionary<string, string> FieldByProperty = new(StringComparer.Ordinal)
     {
         ["customerName"] = "Buyer name",

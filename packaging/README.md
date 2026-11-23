@@ -336,6 +336,14 @@ Useful controls:
 .\updater\install-update-task.ps1 -Remove
 ```
 
+An operator can run the same verification from the tray with *Check for updates…*.
+It prompts for elevation, reads `update.manifestUrl`, `update.signerThumbprint` and
+`update.channel` from `config.json`, and runs the updater with `-DryRun
+-AllowTrayUpdate`: the manifest, hash, signature and health checks are reported, but
+nothing is installed and the tray is never stopped. An empty `signerThumbprint`
+disables the check; the scheduled task's pin is stored in the task definition and is
+independent of it.
+
 Service mode is required by default. A tray-mode till cannot be stopped
 reliably by a `SYSTEM` task, so `auto-update.ps1` refuses it unless
 `-AllowTrayUpdate` is passed deliberately; even then an operator must sign in

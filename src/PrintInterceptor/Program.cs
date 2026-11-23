@@ -218,6 +218,21 @@ public static class Program
             return 0;
         }
 
+        // One tray per desktop session: a second copy would fight over the same
+        // capture port and ledger. The Windows service lives in session 0, so the
+        // session-local mutex never collides with it.
+        using var singleInstance = new Mutex(initiallyOwned: true, @"Local\PrintInterceptor.Tray", out var firstInstance);
+        if (!firstInstance)
+        {
+            MessageBox.Show(
+                "PrintInterceptor is already running in the system tray." + Environment.NewLine +
+                "Double-click its icon to open the dashboard.",
+                "PrintInterceptor",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return 0;
+        }
+
         try
         {
             host.Start();

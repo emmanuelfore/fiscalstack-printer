@@ -30,6 +30,7 @@ public sealed class DashboardForm : Form
     private readonly OfflineSyncEngine _sync;
     private readonly PrintSnapshotStore _snapshots;
     private readonly PrintJobPipeline _pipeline;
+    private readonly JobStore _jobs;
     private readonly ILog _log;
     private readonly CancellationTokenSource _cts = new();
     private readonly System.Windows.Forms.Timer _timer;
@@ -66,6 +67,7 @@ public sealed class DashboardForm : Form
         OfflineSyncEngine sync,
         PrintSnapshotStore snapshots,
         PrintJobPipeline pipeline,
+        JobStore jobs,
         ILog log)
     {
         _config = config;
@@ -75,6 +77,7 @@ public sealed class DashboardForm : Form
         _sync = sync;
         _snapshots = snapshots;
         _pipeline = pipeline;
+        _jobs = jobs;
         _log = log;
 
         Text = "PrintInterceptor — Dashboard";
@@ -668,7 +671,7 @@ public sealed class DashboardForm : Form
     private void OpenJobs()
     {
         // The jobs window owns reprint and per-job detail; the dashboard stays a read-only summary.
-        using var form = new JobsForm(_ledger, _snapshots, _pipeline, _log);
+        using var form = new JobsForm(_ledger, _snapshots, _pipeline, _jobs, _log);
         form.ShowDialog(this);
         _ = RefreshAsync();
     }

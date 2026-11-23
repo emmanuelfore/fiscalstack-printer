@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -6,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Win32;
+using PrintInterceptor.Core.Capture;
 using PrintInterceptor.Core.Configuration;
 using PrintInterceptor.Core.Diagnostics;
 using PrintInterceptor.Core.Fiscalisation;
@@ -40,6 +43,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly PrintSnapshotStore _snapshots;
     private readonly FiscalDayReportService _dayReports;
     private readonly PrintJobPipeline _pipeline;
+    private readonly PrintJobServer _server;
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly ToolStripMenuItem _statusItem;
@@ -50,7 +54,10 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly ToolStripMenuItem _reviewItem;
     private readonly ToolStripMenuItem _failuresItem;
     private readonly ToolStripMenuItem _pauseItem;
+    private readonly ToolStripMenuItem _capturePauseItem;
+    private readonly ToolStripMenuItem _dashboardItem;
     private readonly ToolStripMenuItem _autostartItem;
+    private DashboardForm? _dashboard;
     private readonly CancellationTokenSource _cts = new();
     private readonly Icon _onlineIcon;
     private readonly Icon _pendingIcon;
@@ -86,6 +93,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         _snapshots = services.GetRequiredService<PrintSnapshotStore>();
         _dayReports = services.GetRequiredService<FiscalDayReportService>();
         _pipeline = services.GetRequiredService<PrintJobPipeline>();
+        _server = services.GetRequiredService<PrintJobServer>();
 
         _onlineIcon = CreateStatusIcon(Color.FromArgb(34, 197, 94));
         _pendingIcon = CreateStatusIcon(Color.FromArgb(245, 158, 11));
@@ -108,6 +116,8 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             Visible = false
         };
+        _capturePauseItem = new ToolStripMenuItem("Pause capture", null, ToggleCapturePause);
+        _dashboardItem = new ToolStripMenuItem("Show Dashboard", null, (_, _) => ShowDashboard());
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(_statusItem);
@@ -119,7 +129,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         menu.Items.Add(_failuresItem);
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Dashboard…", null, (_, _) => ShowDashboard()));
+        menu.Items.Add(_dashboardItem);
+        menu.Items.Add(_capturePauseItem);
+        menu.Items.Add(new ToolStripMenuItem("Check for updates…", null, CheckForUpdates));
         menu.Items.Add(new ToolStripMenuItem("Sync offline receipts now", null, SyncNow));
         menu.Items.Add(new ToolStripMenuItem("Reconcile unknown receipts now", null, ReconcileNow));
         menu.Items.Add(new ToolStripMenuItem("Fiscal status…", null, (_, _) => ShowFiscalStatus()));
@@ -228,9 +240,12 @@ public sealed class TrayApplicationContext : ApplicationContext
                     : $"Offline queue: {pending} signed receipt(s) waiting";
             _queueItem.Visible = _offline.Enabled || pending > 0 || paused;
 
+            var capturePaused = _server.IsProcessingPaused;
+            _capturePauseItem.Text = capturePaused ? "Resume capture" : "Pause capture";
+
             _notifyIcon.Icon = paused || !online
                 ? _offlineIcon
-                : _failuresItem.Visible || _reviewItem.Visible || pending > 0
+                : capturePaused || _failuresItem.Visible || _reviewItem.Visible || pending > 0
                     ? _pendingIcon
                     : _onlineIcon;
 
@@ -244,6 +259,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             if (pending > 0) parts.Add($"{pending} queued");
             if (_needsReview > 0) parts.Add($"{_needsReview} to review");
             if (paused) parts.Add("sync PAUSED");
+            if (capturePaused) parts.Add("capture PAUSED");
             if (!online)
             {
                 if (!_offline.Enabled) parts.Add("offline disabled");
@@ -747,7 +763,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private void ShowJobs()
     {
-        using var form = new JobsForm(_ledger, _snapshots, _pipeline, _log);
+        using var form = new JobsForm(_ledger, _snapshots, _pipeline, _jobs, _log);
         form.ShowDialog();
     }
 
@@ -780,14 +796,158 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// <summary>
     /// The one-page operator view copied from FiscalBridge: today's KPIs, hourly activity, recent
     /// jobs and the fiscal-day/close-check panel. It reads the same ledger the pipeline writes.
+    /// Unlike the other windows it stays open beside the till: the menu item and a double-click
+    /// on the icon toggle it between shown and hidden, the way FiscalBridge does.
     /// </summary>
     private void ShowDashboard()
     {
-        using var form = new DashboardForm(_config, _client, _company, _ledger, _sync, _snapshots, _pipeline, _log);
-        form.ShowDialog();
-        _deviceStatusAt = DateTimeOffset.MinValue;
-        _ = RefreshAsync(forceDevice: true);
+        if (_dashboard is { IsDisposed: false } dashboard)
+        {
+            if (dashboard.Visible)
+            {
+                dashboard.Hide();
+            }
+            else
+            {
+                dashboard.Show();
+                dashboard.Activate();
+            }
+        }
+        else
+        {
+            _dashboard = new DashboardForm(_config, _client, _company, _ledger, _sync, _snapshots, _pipeline, _jobs, _log);
+            _dashboard.FormClosed += (_, _) =>
+            {
+                _dashboard = null;
+                _dashboardItem.Text = "Show Dashboard";
+                _deviceStatusAt = DateTimeOffset.MinValue;
+                _ = RefreshAsync(forceDevice: true);
+            };
+            _dashboard.Show();
+        }
+
+        _dashboardItem.Text = _dashboard is { Visible: true } ? "Hide Dashboard" : "Show Dashboard";
     }
+
+    /// <summary>
+    /// Holds fiscalisation without refusing prints: the spooler still delivers, jobs queue,
+    /// and everything captured while paused is processed on resume. Shutdown always resumes.
+    /// </summary>
+    private void ToggleCapturePause(object? sender, EventArgs e)
+    {
+        if (_server.IsProcessingPaused)
+        {
+            _server.ResumeProcessing();
+            Balloon("Capture resumed", "Jobs captured while paused are being fiscalised now.", ToolTipIcon.Info);
+        }
+        else
+        {
+            _server.PauseProcessing();
+            Balloon(
+                "Capture paused",
+                "Prints are still captured and queue, but nothing is fiscalised until you resume. " +
+                "Do not leave a till paused at closing time.",
+                ToolTipIcon.Warning);
+        }
+
+        _ = RefreshAsync();
+    }
+
+    /// <summary>
+    /// Runs the bundled updater in dry-run mode: it downloads the manifest's installer, checks
+    /// SHA256 and the pinned Authenticode signer and reports the till's health, but installs
+    /// nothing. Installing stays with the elevated scheduled task.
+    /// </summary>
+    private async void CheckForUpdates(object? sender, EventArgs e)
+    {
+        var pin = _config.Update.SignerThumbprint;
+        if (pin.Length == 0)
+        {
+            MessageBox.Show(
+                "No release signer is pinned yet." + Environment.NewLine + Environment.NewLine +
+                "Set update.signerThumbprint in the configuration file to the thumbprint of the " +
+                "certificate that signs FiscalStack releases, then check again.",
+                "Check for updates",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        var script = Path.Combine(AppContext.BaseDirectory, "updater", "auto-update.ps1");
+        if (!File.Exists(script))
+        {
+            MessageBox.Show(
+                $"The updater script was not found at:{Environment.NewLine}{script}",
+                "Check for updates",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var output = Path.Combine(Path.GetTempPath(), $"printinterceptor-update-check-{Guid.NewGuid():N}.log");
+        var command =
+            "$ErrorActionPreference='Stop'; " +
+            $"try {{ & '{Ps(script)}' -DryRun -AllowTrayUpdate -SignerThumbprint '{Ps(pin)}' " +
+            $"-ManifestUrl '{Ps(_config.Update.ManifestUrl)}' -Channel '{Ps(_config.Update.Channel)}' " +
+            $"*>&1 | Out-File -FilePath '{Ps(output)}' -Encoding utf8; " +
+            $"Add-Content -Path '{Ps(output)}' -Value 'CHECK_EXIT=0' }} " +
+            $"catch {{ Add-Content -Path '{Ps(output)}' -Value ($_ | Out-String); " +
+            $"Add-Content -Path '{Ps(output)}' -Value 'CHECK_EXIT=1' }}";
+
+        try
+        {
+            var start = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command}\"",
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+
+            using var process = Process.Start(start);
+            if (process is null)
+            {
+                return;
+            }
+
+            await process.WaitForExitAsync(_cts.Token);
+
+            var text = File.Exists(output) ? File.ReadAllText(output) : "";
+            var succeeded = text.Contains("CHECK_EXIT=0", StringComparison.Ordinal);
+            var message = text.Replace("CHECK_EXIT=0", "").Replace("CHECK_EXIT=1", "").Trim();
+            if (message.Length == 0)
+            {
+                message = "The updater produced no output.";
+            }
+
+            MessageBox.Show(
+                Truncate(message, 1800),
+                succeeded ? "Update check passed" : "Update check failed",
+                MessageBoxButtons.OK,
+                succeeded ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // The operator dismissed the elevation prompt.
+            Balloon("Update check cancelled", "The check needs administrator rights; nothing was changed.", ToolTipIcon.Info);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Checking for updates failed", ex);
+            MessageBox.Show(ex.Message, "Check for updates", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            try { File.Delete(output); } catch (IOException) { }
+        }
+    }
+
+    /// <summary>A path inside a single-quoted PowerShell string.</summary>
+    private static string Ps(string value) => value.Replace("'", "''");
 
     private void OpenCurrentLogFile(object? sender, EventArgs e)
     {
@@ -1053,6 +1213,11 @@ public sealed class TrayApplicationContext : ApplicationContext
             _cts.Cancel();
             _timer.Stop();
             _timer.Dispose();
+            if (_dashboard is { IsDisposed: false } dashboard)
+            {
+                dashboard.Close();
+                dashboard.Dispose();
+            }
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();
             _onlineIcon.Dispose();

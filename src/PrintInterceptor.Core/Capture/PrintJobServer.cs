@@ -34,6 +34,9 @@ public sealed class PrintJobServer : IAsyncDisposable
     private readonly object _handlersGate = new();
     private readonly object _stopGate = new();
 
+    private TaskCompletionSource _resumeGate = CompletedGate();
+    private int _processingPaused;
+
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _handlerCts;
@@ -55,6 +58,50 @@ public sealed class PrintJobServer : IAsyncDisposable
             SingleReader = true,
             SingleWriter = false
         });
+    }
+
+    /// <summary>
+    /// True while the operator has paused fiscalisation. Connections are still accepted and
+    /// their bytes captured — the spooler must never see a refused print — but jobs wait in
+    /// the queue instead of being processed until <see cref="ResumeProcessing"/>.
+    /// </summary>
+    public bool IsProcessingPaused => Volatile.Read(ref _processingPaused) == 1;
+
+    public void PauseProcessing()
+    {
+        if (Interlocked.Exchange(ref _processingPaused, 1) == 0)
+        {
+            _resumeGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _log.Warn("Capture processing paused by the operator. Jobs are still captured and queue until resumed.");
+        }
+    }
+
+    public void ResumeProcessing()
+    {
+        if (Interlocked.Exchange(ref _processingPaused, 0) == 1)
+        {
+            _resumeGate.TrySetResult();
+            _log.Info("Capture processing resumed. Queued jobs will now be fiscalised.");
+        }
+    }
+
+    private static TaskCompletionSource CompletedGate()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        gate.SetResult();
+        return gate;
+    }
+
+    /// <summary>
+    /// Re-checks the flag after every wake so a pause/resume that races the gate swap can
+    /// never leave the worker waiting on a gate nobody will complete.
+    /// </summary>
+    private async Task WaitWhilePausedAsync(CancellationToken cancellationToken)
+    {
+        while (Volatile.Read(ref _processingPaused) == 1)
+        {
+            await _resumeGate.Task.WaitAsync(cancellationToken);
+        }
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -322,31 +369,39 @@ public sealed class PrintJobServer : IAsyncDisposable
     {
         try
         {
-            await foreach (var job in _queue.Reader.ReadAllAsync(cancellationToken))
+            while (await _queue.Reader.WaitToReadAsync(cancellationToken))
             {
-                // A job that was already in flight when shutdown started keeps the
-                // host token, so an API call can still be cancelled. Jobs dequeued
-                // during the drain get a bounded token instead and still fiscalise.
-                var draining = _cts?.IsCancellationRequested == true;
-                var processToken = draining ? EnsureDrainCts().Token : _cts!.Token;
+                // An operator pause holds jobs in the queue itself: counting what is
+                // waiting stays honest, backpressure reaches the spooler, and shutdown
+                // resumes first so the drain below is never stuck behind a pause.
+                await WaitWhilePausedAsync(cancellationToken);
 
-                try
+                while (_queue.Reader.TryRead(out var job))
                 {
-                    await _processor.ProcessAsync(job, processToken);
-                }
-                catch (OperationCanceledException) when (draining && processToken.IsCancellationRequested)
-                {
-                    _log.Warn("Shutdown drain timed out; some queued print jobs may remain unprocessed.");
-                    break;
-                }
-                catch (OperationCanceledException)
-                {
-                    // Either the in-flight API call was cancelled by application
-                    // shutdown or the job cancelled itself. Keep draining the queue.
-                }
-                catch (Exception ex)
-                {
-                    _log.Error("Unhandled error while processing a print job", ex);
+                    // A job that was already in flight when shutdown started keeps the
+                    // host token, so an API call can still be cancelled. Jobs dequeued
+                    // during the drain get a bounded token instead and still fiscalise.
+                    var draining = _cts?.IsCancellationRequested == true;
+                    var processToken = draining ? EnsureDrainCts().Token : _cts!.Token;
+
+                    try
+                    {
+                        await _processor.ProcessAsync(job, processToken);
+                    }
+                    catch (OperationCanceledException) when (draining && processToken.IsCancellationRequested)
+                    {
+                        _log.Warn("Shutdown drain timed out; some queued print jobs may remain unprocessed.");
+                        return;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Either the in-flight API call was cancelled by application
+                        // shutdown or the job cancelled itself. Keep draining the queue.
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Error("Unhandled error while processing a print job", ex);
+                    }
                 }
             }
         }
@@ -456,6 +511,10 @@ public sealed class PrintJobServer : IAsyncDisposable
     {
         try
         {
+            // A paused capture must not hold the shutdown drain: whatever was
+            // queued while paused is processed like any other pending job.
+            ResumeProcessing();
+
             // 1. Stop accepting new work; application cancellation still reaches
             //    an API call that is already in flight.
             _externalRegistration.Unregister();

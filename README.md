@@ -281,11 +281,15 @@ profile instead of making someone hand-write one:
 
 - Pick a job from the dropdown — the receipts this till kept, newest first — or **From file…**
   a saved printout. The text is shown exactly as it arrived and stays editable, so a receipt
-  from another branch can be pasted in.
-- **Analyse** parses the same receipt twice and puts the two readings side by side: what the
-  rules in use read now, and what the profile being suggested would read. Every field carries
-  the line number it came from, or *— not read —* in red. That preview is the acceptance test;
-  nothing is saved on a promise.
+  from another branch can be pasted in. Edits reparse live after a short pause; **Analyse**
+  forces an immediate run.
+- The receipt is parsed twice and the two readings are side by side: what the rules in use read
+  now, and what the profile being suggested would read. Every field carries the line number it
+  came from, or *— not read —* in red. That preview is the acceptance test; nothing is saved on
+  a promise.
+- **Run on last 20** tries the suggested rules against the most recent retained jobs and shows
+  each one's before/after status, with how many improved and how many regressed. A rule that
+  fixes one POS but breaks a layout the till already reads is visible before it is saved.
 - Each rule the profile adds is listed with the values it writes, the line that proves it, and
   why it is needed — "'ITEM' and 'QTY' are the columns your POS prints; the built-in words are
   not on that line".
@@ -388,22 +392,35 @@ status without a Windows service. A service cannot host a tray icon (it runs in 
 so choose one mode per till.
 
 - **Icon:** green = API online and queue empty; amber = API online with receipts waiting to
-  sync; red = API unreachable, status unknown, or the sync queue is paused. The tooltip shows
-  the API state, fiscal day, queued receipts and any receipts held for review.
+  sync or capture paused; red = API unreachable, status unknown, or the sync queue is paused.
+  The tooltip shows the API state, fiscal day, queued receipts, receipts held for review and
+  whether capture is paused.
 - **Menu:** live API status, fiscal day number/state, *Open fiscal day…* / *Close fiscal day…*
   (enabled from the live state; the close item reads *Retry close fiscal day…* after a failed
   close), queue size, receipts needing review, *Resume offline sync*
-  (only while paused), *Dashboard…*, *Sync offline receipts now*, *Reconcile unknown receipts now*,
+  (only while paused), *Show/Hide Dashboard*, *Pause/Resume capture*, *Check for updates…*,
+  *Sync offline receipts now*, *Reconcile unknown receipts now*,
   *Fiscal status…*, *Fiscalisation jobs…*, *Daily Z-shift summary…*,
   *Test connection*, *Settings…*, open the config / logs / current log file / data / parse-profile
   folders, *Import receipt parse profile…*, *Capture receipt layout from a job…*,
-  *Start with Windows*, *Exit*. Double-clicking the icon opens the Dashboard. Day open/close asks
-  for confirmation and reports the gateway's answer; the device state is polled every 30 seconds.
-- **Dashboard** (double-click the icon or *Dashboard…*): today's KPIs (receipts fiscalised,
+  *Start with Windows*, *Exit*. Day open/close asks for confirmation and reports the gateway's
+  answer; the device state is polled every 30 seconds. Only one tray runs per desktop session:
+  a second copy exits with a message instead of fighting over the capture port.
+- **Dashboard** (double-click the icon or *Show Dashboard*): today's KPIs (receipts fiscalised,
   queued/retrying, needing review, totals by currency), an hourly activity chart, the latest jobs
   with a status filter, and the fiscal-day card with a live elapsed timer and close-day checks
   (FDMS reachable, queue empty, nothing needing review). It reads the local ledger, so it works
-  offline; only the device card needs FiscalStack.
+  offline; only the device card needs FiscalStack. It stays open beside the till; the menu item
+  and the icon toggle it between shown and hidden.
+- **Pause/Resume capture** holds fiscalisation without refusing prints: the spooler still delivers,
+  captured jobs wait in the queue, and resuming processes them in order. Shutdown always resumes
+  so nothing captured is lost. Do not leave a till paused at closing time.
+- **Check for updates…** runs the bundled `updater/auto-update.ps1` in dry-run mode after an
+  elevation prompt. It verifies the HTTPS manifest, SHA256, the pinned Authenticode signer and
+  the till's health, and reports the result; it never installs or stops the tray. Set
+  `update.signerThumbprint` in `config.json` to the release certificate's 40 hex characters first
+  (spaces and colons in a pasted value are ignored). Installation stays with the scheduled task
+  described in [packaging/README.md](packaging/README.md#enable-auto-update).
 - **Notifications** (balloons on transition, not repeatedly): a fiscal day close failed, the
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
@@ -419,8 +436,17 @@ so choose one mode per till.
 - **Start with Windows** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it
   applies to the user who ticks it, not to all users.
 
-Double-click the icon to open settings. There is no main window; the app keeps running in
-the notification area until *Exit* is chosen.
+Double-clicking the icon toggles the dashboard. There is no single required main window; the app
+keeps running in the notification area until *Exit* is chosen.
+
+### Fiscalisation jobs and job detail
+
+*Fiscalisation jobs…* lists every ledger entry with its status, total, print result and reason,
+filterable by needs review / rejected / unknown outcome / fiscalised / printing problems. A
+double-click opens the job drawer with three tabs: the full record (including reprint count,
+suppressed duplicate attempts and reconciliation passes), the exact request body that was sent
+(as retained by `storage.retainJobs`), and the receipt text it was built from. It is a read-only
+investigation view: reprints still go through the explicit button after confirmation.
 
 ### Fiscal status and day control
 

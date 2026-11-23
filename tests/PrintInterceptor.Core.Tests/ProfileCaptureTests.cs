@@ -105,6 +105,23 @@ public class ProfileCaptureTests : IDisposable
     }
 
     [Fact]
+    public void TheRegressionRunReadsWithTheSuggestedRulesWithoutTouchingTheLiveConfig()
+    {
+        // The Parser Lab's "Run on last 20" re-parses other retained jobs with the candidate
+        // rules. It must read exactly what the capture preview reads, and it must never edit
+        // the configuration the till is actually using.
+        var config = new ParseConfig();
+        var before = JsonSerializer.Serialize(config, ProfileJson);
+        var capture = ProfileCapturer.Capture(UnknownPos, config);
+
+        var rerun = ProfileCapturer.ParseWithRules(UnknownPos, config, capture.Rules);
+
+        Assert.Equal(capture.Suggested.Result.Status, rerun.Status);
+        Assert.Equal(capture.Suggested.Items, rerun.Receipt?.Items.Count ?? 0);
+        Assert.Equal(before, JsonSerializer.Serialize(config, ProfileJson));
+    }
+
+    [Fact]
     public void NamesTheColumnsThatMakeTheItemTableReadable()
     {
         var capture = ProfileCapturer.Capture(UnknownPos, new ParseConfig());

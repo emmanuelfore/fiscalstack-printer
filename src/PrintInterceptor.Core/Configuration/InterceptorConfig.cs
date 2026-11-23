@@ -47,6 +47,7 @@ public sealed class InterceptorConfig
     public StorageConfig Storage { get; set; } = new();
     public OfflineConfig Offline { get; set; } = new();
     public ReconcileConfig Reconcile { get; set; } = new();
+    public UpdateConfig Update { get; set; } = new();
 
     [JsonIgnore]
     public string ConfigPath { get; set; } = "";
@@ -303,6 +304,19 @@ public sealed class InterceptorConfig
                        "Turn reconcile.autoResend off to only adopt the server's proof.");
         }
 
+        if (Update.SignerThumbprint.Length > 0 &&
+            (Update.SignerThumbprint.Length != 40 ||
+             !Update.SignerThumbprint.All(Uri.IsHexDigit)))
+        {
+            errors.Add("update.signerThumbprint must be the 40 hex characters of the release signer's certificate thumbprint.");
+        }
+
+        if (Update.SignerThumbprint.Length > 0 &&
+            !Update.ManifestUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add("update.manifestUrl must be HTTPS; an unsigned channel could deliver a forged installer.");
+        }
+
         return errors;
     }
 
@@ -320,6 +334,11 @@ public sealed class InterceptorConfig
         Storage ??= new StorageConfig();
         Offline ??= new OfflineConfig();
         Reconcile ??= new ReconcileConfig();
+        Update ??= new UpdateConfig();
+
+        // Operators paste thumbprints with spaces or colons; the pin itself is the hex.
+        Update.SignerThumbprint = new string(
+            (Update.SignerThumbprint ?? "").Where(Uri.IsHexDigit).ToArray()).ToUpperInvariant();
 
         Parse.Patterns ??= ParsePatterns.Defaults();
         Parse.Limits ??= ParseLimits.Defaults();
@@ -1291,6 +1310,21 @@ public sealed class ReconcileConfig
 
     /// <summary>How many invoice pages the lookup reads, newest first. The list route takes no filters.</summary>
     public int ScanPages { get; set; } = 10;
+}
+
+/// <summary>
+/// Where the signed update manifest lives and which signer this till trusts. The tray's
+/// "Check for updates" runs the bundled updater in dry-run mode with these values; actually
+/// installing still goes through the elevated scheduled task, never through the tray.
+/// </summary>
+public sealed class UpdateConfig
+{
+    public string ManifestUrl { get; set; } = "https://updates.fiscalstack.co.zw/printinterceptor/update.json";
+
+    /// <summary>SHA1 thumbprint of the Authenticode certificate that signs releases. Empty = checks disabled.</summary>
+    public string SignerThumbprint { get; set; } = "";
+
+    public string Channel { get; set; } = "stable";
 }
 
 public sealed class OfflineTaxConfig

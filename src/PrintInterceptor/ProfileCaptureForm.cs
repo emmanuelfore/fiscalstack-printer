@@ -44,6 +44,9 @@ public sealed class ProfileCaptureForm : Form
     private string? _suggestedName;
     private List<LedgerEntry> _entries = new();
 
+    /// <summary>Live reparse: typing in the receipt re-reads it once the operator pauses, like FiscalBridge's Parser Lab.</summary>
+    private readonly System.Windows.Forms.Timer _reparseTimer = new() { Interval = 400 };
+
     public ProfileCaptureForm(
         JobLedger ledger,
         JobStore jobs,
@@ -78,6 +81,20 @@ public sealed class ProfileCaptureForm : Form
         var analyse = new Button { Text = "Analyse", AutoSize = true };
         analyse.Click += (_, _) => Analyse();
 
+        var regression = new Button { Text = "Run on last 20", AutoSize = true };
+        regression.Click += (_, _) => RunRegression();
+
+        _reparseTimer.Tick += (_, _) =>
+        {
+            _reparseTimer.Stop();
+            Analyse();
+        };
+        FormClosed += (_, _) =>
+        {
+            _reparseTimer.Stop();
+            _reparseTimer.Dispose();
+        };
+
         var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
@@ -89,6 +106,7 @@ public sealed class ProfileCaptureForm : Form
         toolbar.Controls.Add(_job);
         toolbar.Controls.Add(fromFile);
         toolbar.Controls.Add(analyse);
+        toolbar.Controls.Add(regression);
 
         _receipt = new TextBox
         {
@@ -100,9 +118,15 @@ public sealed class ProfileCaptureForm : Form
             BorderStyle = BorderStyle.FixedSingle
         };
 
+        _receipt.TextChanged += (_, _) =>
+        {
+            _reparseTimer.Stop();
+            _reparseTimer.Start();
+        };
+
         var receiptText = new GroupBox
         {
-            Text = "The job exactly as this till received it (editable — paste a receipt from another till)",
+            Text = "The job exactly as this till received it (editable — paste a receipt from another till; edits reparse live)",
             Dock = DockStyle.Fill,
             Padding = new Padding(8)
         };
@@ -395,6 +419,86 @@ public sealed class ProfileCaptureForm : Form
         _capture = capture;
         Show(capture);
     }
+
+    /// <summary>
+    /// FiscalBridge's regression check: run the suggested rules over the till's most recent
+    /// retained jobs before anything is saved, so a layout fix for one POS cannot silently
+    /// break another POS this till already reads.
+    /// </summary>
+    private void RunRegression()
+    {
+        if (_capture is not { HasSuggestions: true } capture)
+        {
+            MessageBox.Show(this, "Analyse a receipt first — there are no suggested rules to test yet.",
+                "Nothing to test", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var recent = _entries.Take(20).ToList();
+        if (recent.Count == 0)
+        {
+            MessageBox.Show(this,
+                "No retained jobs to test. Turn storage.retainJobs on, or open a receipt with “From file…”.",
+                "Nothing to test", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var lines = new StringBuilder();
+        int tested = 0, currentOk = 0, suggestedOk = 0, improved = 0, regressed = 0;
+        foreach (var entry in recent)
+        {
+            var text = _jobs.LoadText(entry.SourceFile);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                lines.AppendLine($"{Label(entry)}: text not retained — skipped");
+                continue;
+            }
+
+            ParseResult before;
+            ParseResult after;
+            try
+            {
+                before = new ReceiptParser(_config.Parse).Parse(text);
+                after = ProfileCapturer.ParseWithRules(text, _config.Parse, capture.Rules);
+            }
+            catch (Exception ex)
+            {
+                lines.AppendLine($"{Label(entry)}: parse error — {ex.Message}");
+                continue;
+            }
+
+            tested++;
+            var beforeOk = before.Status == ParseStatus.Parsed;
+            var afterOk = after.Status == ParseStatus.Parsed;
+            if (beforeOk) currentOk++;
+            if (afterOk) suggestedOk++;
+            if (!beforeOk && afterOk) improved++;
+            if (beforeOk && !afterOk) regressed++;
+            lines.AppendLine($"{Label(entry)}: {DescribeReading(before)} → {DescribeReading(after)}");
+        }
+
+        var summary = tested == 0
+            ? "None of the last jobs retained readable text."
+            : $"{suggestedOk} of {tested} job(s) parse with the suggested rules (current rules: {currentOk}). " +
+              $"Improved: {improved}. Regressed: {regressed}.";
+        if (regressed > 0)
+        {
+            summary += Environment.NewLine + Environment.NewLine +
+                       "A regressed job means the suggested rules break a layout this till already reads. " +
+                       "Check that job before saving.";
+        }
+
+        MessageBox.Show(this, summary + Environment.NewLine + Environment.NewLine + lines,
+            "Regression on the last jobs",
+            MessageBoxButtons.OK,
+            regressed > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+    }
+
+    private static string Label(LedgerEntry entry) =>
+        (entry.InvoiceNumber ?? (entry.Hash.Length >= 8 ? entry.Hash[..8] : entry.Hash)).PadRight(16);
+
+    private static string DescribeReading(ParseResult result) =>
+        result.Status + (result.Receipt is { } receipt ? $" ({receipt.Items.Count} items)" : "");
 
     private void Show(ProfileCapture capture)
     {

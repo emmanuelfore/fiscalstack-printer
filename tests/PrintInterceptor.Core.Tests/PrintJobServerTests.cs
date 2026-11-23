@@ -16,10 +16,12 @@ public class PrintJobServerTests
     {
         private readonly Channel<PrintJob> _jobs = Channel.CreateUnbounded<PrintJob>();
 
-        public ValueTask<PrintJob> NextAsync(TimeSpan timeout)
+        public async Task<PrintJob> NextAsync(TimeSpan timeout)
         {
+            // The timeout source has to stay alive until the read completes: disposing it
+            // when returning a ValueTask stops its timer and a stalled job waits forever.
             using var cts = new CancellationTokenSource(timeout);
-            return _jobs.Reader.ReadAsync(cts.Token);
+            return await _jobs.Reader.ReadAsync(cts.Token);
         }
 
         public Task ProcessAsync(PrintJob job, CancellationToken cancellationToken)
@@ -53,10 +55,10 @@ public class PrintJobServerTests
             _processed.Writer.TryWrite(job);
         }
 
-        public ValueTask<PrintJob> NextAsync(TimeSpan timeout)
+        public async Task<PrintJob> NextAsync(TimeSpan timeout)
         {
             using var cts = new CancellationTokenSource(timeout);
-            return _processed.Reader.ReadAsync(cts.Token);
+            return await _processed.Reader.ReadAsync(cts.Token);
         }
     }
 
@@ -169,6 +171,52 @@ public class PrintJobServerTests
 
         Assert.Equal("first receipt\n", Encoding.ASCII.GetString(first.Data));
         Assert.Equal("second receipt\n", Encoding.ASCII.GetString(second.Data));
+    }
+
+    [Fact]
+    public async Task PausedCaptureStillReceivesJobsButHoldsThemUntilResumed()
+    {
+        var port = FreePort();
+        var processor = new RecordingProcessor();
+        await using var server = new PrintJobServer(processor, ConfigFor(port), NullLog.Instance);
+        await server.StartAsync(CancellationToken.None);
+
+        server.PauseProcessing();
+        Assert.True(server.IsProcessingPaused);
+
+        // The spooler must still be able to deliver while paused: the bytes are
+        // captured and queued, just not fiscalised.
+        await SendAsync(port, "held-while-paused");
+        await WaitForQueuedCountAsync(server, 1, TimeSpan.FromSeconds(5));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await processor.NextAsync(TimeSpan.FromMilliseconds(300)));
+
+        server.ResumeProcessing();
+        Assert.False(server.IsProcessingPaused);
+
+        var job = await processor.NextAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("held-while-paused", Encoding.ASCII.GetString(job.Data));
+    }
+
+    [Fact]
+    public async Task ShutdownDrainsJobsCapturedWhilePaused()
+    {
+        var port = FreePort();
+        var processor = new RecordingProcessor();
+        await using var server = new PrintJobServer(processor, ConfigFor(port), NullLog.Instance);
+        await server.StartAsync(CancellationToken.None);
+
+        server.PauseProcessing();
+        await SendAsync(port, "queued-before-shutdown");
+        await WaitForQueuedCountAsync(server, 1, TimeSpan.FromSeconds(5));
+
+        // A pause is an operator state, not a reason to lose a captured sale:
+        // stopping resumes processing and drains the queue like any shutdown.
+        await server.StopAsync();
+
+        var job = await processor.NextAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("queued-before-shutdown", Encoding.ASCII.GetString(job.Data));
     }
 
     [Fact]

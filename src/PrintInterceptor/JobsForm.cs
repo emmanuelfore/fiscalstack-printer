@@ -17,6 +17,7 @@ public sealed class JobsForm : Form
     private readonly JobLedger _ledger;
     private readonly PrintSnapshotStore _snapshots;
     private readonly PrintJobPipeline _pipeline;
+    private readonly JobStore _jobs;
     private readonly ILog _log;
 
     private readonly ListView _list;
@@ -26,11 +27,12 @@ public sealed class JobsForm : Form
     private readonly Button _openJob;
     private readonly Label _count;
 
-    public JobsForm(JobLedger ledger, PrintSnapshotStore snapshots, PrintJobPipeline pipeline, ILog log)
+    public JobsForm(JobLedger ledger, PrintSnapshotStore snapshots, PrintJobPipeline pipeline, JobStore jobs, ILog log)
     {
         _ledger = ledger;
         _snapshots = snapshots;
         _pipeline = pipeline;
+        _jobs = jobs;
         _log = log;
 
         Text = "Fiscalisation jobs";
@@ -277,8 +279,8 @@ public sealed class JobsForm : Form
         var entry = SelectedEntry();
         if (entry is not null)
         {
-            MessageBox.Show(Describe(entry), $"Job {entry.Hash[..Math.Min(12, entry.Hash.Length)]}",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            using var detail = new JobDetailForm(entry, _jobs, _snapshots);
+            detail.ShowDialog(this);
         }
     }
 

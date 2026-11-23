@@ -277,6 +277,50 @@ public class InterceptorConfigTests
     }
 
     [Fact]
+    public void AnUpdatePinMustBeARealThumbprintOnAnHttpsChannel()
+    {
+        var config = new InterceptorConfig
+        {
+            Update = new UpdateConfig { SignerThumbprint = "not-a-thumbprint" }
+        };
+        Assert.Contains(config.Validate(), e => e.Contains("update.signerThumbprint"));
+
+        config.Update.SignerThumbprint = new string('A', 40);
+        Assert.DoesNotContain(config.Validate(), e => e.Contains("update.signerThumbprint"));
+
+        config.Update.ManifestUrl = "http://updates.example/update.json";
+        Assert.Contains(config.Validate(), e => e.Contains("update.manifestUrl"));
+    }
+
+    [Fact]
+    public void APastedThumbprintIsNormalisedToBareHex()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "printinterceptor-tests-" + Guid.NewGuid().ToString("N"));
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(path, """
+                {
+                  "update": { "signerThumbprint": "5b8cedbf fad7b433 7e309124 c6e4533f c753ecb3" }
+                }
+                """);
+
+            var loaded = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("5B8CEDBFFAD7B4337E309124C6E4533FC753ECB3", loaded.Update.SignerThumbprint);
+            Assert.Empty(loaded.Validate());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void TheExampleConfigCarriesTheBuiltInReconcileSettings()
     {
         var path = Path.GetFullPath(
