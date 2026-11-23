@@ -405,7 +405,11 @@ public static class Program
                 var separator = line.IndexOf(':');
                 if (separator >= 0)
                 {
-                    var state = line[(separator + 1)..].Trim();
+                    // sc.exe prints "STATE : 4 RUNNING"; callers of --status
+                    // compare against "RUNNING", so keep only the state name.
+                    var state = line[(separator + 1)..]
+                        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                        .LastOrDefault();
                     return string.IsNullOrEmpty(state) ? "UNKNOWN" : state.ToUpperInvariant();
                 }
             }
