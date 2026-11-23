@@ -504,7 +504,7 @@ public sealed class DashboardForm : Form
         AddNav(nav, "Fiscal status", tool: "fiscal-status");
         AddNav(nav, "Reports", page: "Reports");
         AddNav(nav, "Capture layout", tool: "capture");
-        AddNav(nav, "Files & tools", "Tools");
+        AddNav(nav, "Files && tools", "Tools");
 
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 126 };
         var updates = new Button
@@ -538,16 +538,9 @@ public sealed class DashboardForm : Form
         {
             Text = label,
             Width = 188,
-            Height = 40,
-            FlatStyle = FlatStyle.Flat,
-            Font = UiTheme.Ui(9.5f, FontStyle.Bold),
-            BackColor = UiTheme.NavySoft,
-            ForeColor = Color.FromArgb(226, 232, 240),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(14, 0, 8, 0),
             Margin = new Padding(0, 0, 0, 4)
         };
-        button.FlatAppearance.BorderSize = 0;
+        UiTheme.NavButton(button, selected: false, dark: true);
         button.Click += (_, _) =>
         {
             if (page is not null)
@@ -584,9 +577,7 @@ public sealed class DashboardForm : Form
         _currentPage = name;
         foreach (var (key, button) in _navButtons)
         {
-            var selected = key == name;
-            button.BackColor = selected ? UiTheme.Accent : UiTheme.NavySoft;
-            button.ForeColor = Color.White;
+            UiTheme.NavButton(button, selected: key == name, dark: true);
         }
 
         if (name == "Overview")
@@ -644,57 +635,91 @@ public sealed class DashboardForm : Form
             Dock = DockStyle.Fill,
             BackColor = UiTheme.Canvas,
             AutoScroll = true,
-            Padding = new Padding(24)
+            Padding = new Padding(24, 20, 24, 20)
         };
-        var stack = new FlowLayoutPanel
+
+        var stack = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false
+            ColumnCount = 1,
+            BackColor = Color.Transparent
         };
+        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        void Group(string text)
+        void AddRow(Control control)
         {
-            var label = UiTheme.Heading(text);
-            label.Font = UiTheme.Ui(11f, FontStyle.Bold);
-            label.Margin = new Padding(0, 12, 0, 6);
-            stack.Controls.Add(label);
+            stack.RowCount++;
+            stack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            control.Margin = new Padding(0, 0, 0, 14);
+            stack.Controls.Add(control, 0, stack.RowCount - 1);
         }
 
-        void Action(string text, string id)
+        var header = new Panel { AutoSize = true, Padding = new Padding(0, 0, 0, 4) };
+        var title = UiTheme.Heading("Files && tools");
+        title.Dock = DockStyle.Top;
+        var subtitle = UiTheme.Subheading(
+            "Open the files and helpers behind this till. Nothing here changes fiscal state.");
+        subtitle.Dock = DockStyle.Top;
+        subtitle.Padding = new Padding(0, 4, 0, 0);
+        header.Controls.Add(subtitle);
+        header.Controls.Add(title);
+        AddRow(header);
+
+        void Card(string heading, params (string Text, string Id)[] actions)
         {
-            var button = new Button
+            var card = new CardPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(0) };
+            var body = new FlowLayoutPanel
             {
-                Text = text,
-                Width = 330,
-                Height = 36,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(12, 0, 8, 0),
-                Margin = new Padding(0, 2, 8, 2)
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(18, 14, 18, 16)
             };
-            UiTheme.Secondary(button);
-            button.Click += (_, _) => RunTool(id);
-            stack.Controls.Add(button);
+
+            var label = UiTheme.SectionLabel(heading.ToUpperInvariant());
+            label.Font = UiTheme.Ui(9.5f, FontStyle.Bold);
+            label.Margin = new Padding(0, 0, 0, 10);
+            body.Controls.Add(label);
+
+            foreach (var (text, id) in actions)
+            {
+                var button = new Button
+                {
+                    Text = text,
+                    AutoSize = true,
+                    MinimumSize = new Size(360, 36),
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Margin = new Padding(0, 0, 0, 6)
+                };
+                UiTheme.Secondary(button);
+                button.Padding = new Padding(14, 0, 12, 0);
+                button.Click += (_, _) => RunTool(id);
+                body.Controls.Add(button);
+            }
+
+            card.Controls.Add(body);
+            AddRow(card);
         }
 
-        Group("FiscalStack");
-        Action("Sync offline receipts now", "sync");
-        Action("Reconcile unknown receipts now", "reconcile");
-        Action("Test connection", "test-connection");
-        Group("Receipt parsing");
-        Action("Import receipt parse profile…", "import-profile");
-        Action("Open parse profiles folder", "profiles");
-        Action("Capture receipt layout from a job…", "capture");
-        Group("Files");
-        Action("Open configuration file", "open-config");
-        Action("Open data folder", "data");
-        Action("Open received files folder", "received");
-        Action("Open fiscalised invoices folder", "fiscalised");
-        Action("Open logs folder", "logs");
-        Action("Open current log file", "current-log");
-        Group("Windows");
-        Action("Start with Windows", "autostart");
+        Card("FiscalStack",
+            ("Sync offline receipts now", "sync"),
+            ("Reconcile unknown receipts now", "reconcile"),
+            ("Test connection", "test-connection"));
+        Card("Receipt parsing",
+            ("Import receipt parse profile…", "import-profile"),
+            ("Open parse profiles folder", "profiles"),
+            ("Capture receipt layout from a job…", "capture"));
+        Card("Files",
+            ("Open configuration file", "open-config"),
+            ("Open data folder", "data"),
+            ("Open received files folder", "received"),
+            ("Open fiscalised invoices folder", "fiscalised"),
+            ("Open logs folder", "logs"),
+            ("Open current log file", "current-log"));
+        Card("Windows",
+            ("Start with Windows", "autostart"));
 
         page.Controls.Add(stack);
         return page;

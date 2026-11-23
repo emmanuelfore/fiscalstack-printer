@@ -27,11 +27,13 @@ public sealed class ParseRulesPage : UserControl
     private readonly ILog _log;
     private readonly ParseProfileStore _profiles;
     private readonly ParseConfig _draft;
-    private readonly ListBox _nav;
+    private readonly FlowLayoutPanel _nav;
+    private readonly Dictionary<string, Button> _navButtons = new(StringComparer.Ordinal);
     private readonly Panel _host;
     private readonly Label _status;
     private readonly TextBox _sample;
     private readonly TextBox _result;
+    private string? _currentCategory;
 
     public ParseRulesPage(InterceptorConfig config, PrintJobPipeline pipeline, ILog log)
     {
@@ -42,78 +44,168 @@ public sealed class ParseRulesPage : UserControl
         _draft = Clone(config.Parse);
 
         Dock = DockStyle.Fill;
-        BackColor = Color.White;
-        Padding = new Padding(10);
+        BackColor = UiTheme.Canvas;
+        Padding = new Padding(16, 14, 16, 12);
 
-        _nav = new ListBox
+        var root = new TableLayoutPanel
         {
-            Dock = DockStyle.Left,
-            Width = 180,
-            BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Segoe UI", 10f),
-            IntegralHeight = false
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            BackColor = Color.Transparent
         };
-        _nav.Items.AddRange(Categories);
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 214f));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 72f));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        _host = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(14, 0, 8, 8) };
+        var navCard = new CardPanel { Dock = DockStyle.Fill, Padding = new Padding(10), Margin = new Padding(0, 0, 14, 0) };
+        _nav = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = true,
+            BackColor = Color.Transparent
+        };
+        var navCaption = UiTheme.SectionLabel("RULE GROUPS");
+        navCaption.Margin = new Padding(2, 2, 0, 10);
+        _nav.Controls.Add(navCaption);
+        foreach (var category in Categories)
+        {
+            AddNav(category);
+        }
+        navCard.Controls.Add(_nav);
+
+        var header = new Panel { Dock = DockStyle.Fill, Padding = new Padding(2, 6, 0, 6) };
+        var title = UiTheme.Heading("Parse rules");
+        title.Dock = DockStyle.Top;
+        var subtitle = UiTheme.Subheading(
+            "The labels, patterns and tax buckets the till uses to read a receipt. Edits stay in a draft until you save and apply them.");
+        subtitle.Dock = DockStyle.Top;
+        subtitle.Padding = new Padding(0, 4, 0, 0);
+        header.Controls.Add(subtitle);
+        header.Controls.Add(title);
+
+        _host = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.Transparent };
         _sample = new TextBox();
         _result = new TextBox();
 
         _status = new Label
         {
-            AutoSize = true,
-            ForeColor = Color.FromArgb(71, 85, 105),
-            Margin = new Padding(10, 14, 6, 10)
+            AutoSize = false,
+            Width = 340,
+            Height = 34,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = UiTheme.Ui(8.5f),
+            ForeColor = UiTheme.Muted,
+            Margin = new Padding(8, 0, 8, 0)
         };
 
-        var validate = new Button { Text = "Validate", AutoSize = true, MinimumSize = new Size(94, 32) };
+        var validate = ActionButton("Validate");
         validate.Click += (_, _) => ValidateDraft();
-        var revert = new Button { Text = "Revert", AutoSize = true, MinimumSize = new Size(94, 32) };
+        var revert = ActionButton("Revert");
         revert.Click += (_, _) => Revert();
-        var save = new Button { Text = "Save and apply", AutoSize = true, MinimumSize = new Size(132, 32) };
+        var save = ActionButton("Save and apply", primary: true);
         save.Click += (_, _) => Save();
 
-        var actions = new FlowLayoutPanel
+        var actions = new CardPanel
         {
             Dock = DockStyle.Bottom,
-            FlowDirection = FlowDirection.RightToLeft,
-            Height = 54,
-            Padding = new Padding(8)
+            Height = 62,
+            Margin = new Padding(0, 10, 0, 0),
+            Padding = new Padding(0)
         };
-        actions.Controls.Add(save);
-        actions.Controls.Add(revert);
-        actions.Controls.Add(validate);
-        actions.Controls.Add(_status);
+        var actionRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Padding = new Padding(14, 12, 14, 10)
+        };
+        actionRow.Controls.Add(save);
+        actionRow.Controls.Add(revert);
+        actionRow.Controls.Add(validate);
+        actionRow.Controls.Add(_status);
+        actions.Controls.Add(actionRow);
 
-        _nav.SelectedIndexChanged += (_, _) => ShowCategory();
-        Controls.Add(_host);
-        Controls.Add(_nav);
-        Controls.Add(actions);
+        var content = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+        content.Controls.Add(_host);
+        content.Controls.Add(actions);
 
-        _nav.SelectedIndex = 0;
+        root.Controls.Add(header, 1, 0);
+        root.Controls.Add(navCard, 0, 0);
+        root.SetRowSpan(navCard, 2);
+        root.Controls.Add(content, 1, 1);
+        Controls.Add(root);
+
+        SelectCategory(Categories[0]);
+    }
+
+    private void AddNav(string category)
+    {
+        var button = new Button
+        {
+            Text = SafeText(category),
+            Width = 186,
+            Margin = new Padding(0, 0, 0, 4)
+        };
+        UiTheme.NavButton(button, selected: false, dark: false);
+        button.Click += (_, _) => SelectCategory(category);
+        _navButtons[category] = button;
+        _nav.Controls.Add(button);
+    }
+
+    private void SelectCategory(string category)
+    {
+        if (string.Equals(_currentCategory, category, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _currentCategory = category;
+        foreach (var (name, button) in _navButtons)
+        {
+            UiTheme.NavButton(button, selected: string.Equals(name, category, StringComparison.Ordinal), dark: false);
+        }
+        ShowCategory();
     }
 
     private void ShowCategory()
     {
-        if (_nav.SelectedItem is not string category)
+        if (_currentCategory is not string category)
         {
             return;
         }
 
         _host.Controls.Clear();
-        var page = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(4, 10, 4, 4) };
-        var heading = new Label
-        {
-            Text = category,
-            Dock = DockStyle.Top,
-            Font = new Font("Segoe UI", 15f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(15, 23, 42),
-            Margin = new Padding(2, 0, 2, 12)
-        };
+        var page = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.Transparent };
+
+        var heading = UiTheme.Heading(SafeText(category));
+        heading.Dock = DockStyle.Top;
+        heading.Margin = new Padding(2, 0, 2, 2);
+
+        var hint = UiTheme.Subheading(CategoryHint(category));
+        hint.Dock = DockStyle.Top;
+        hint.Margin = new Padding(2, 0, 2, 10);
+
         page.Controls.Add(Body(category));
+        page.Controls.Add(hint);
         page.Controls.Add(heading);
         _host.Controls.Add(page);
     }
+
+    private static string CategoryHint(string category) => category switch
+    {
+        "Labels & markers" => "Match the words the till actually prints. These find values; they do not change what is sent to ZIMRA.",
+        "Patterns" => "Regular expressions used when a label alone is not enough. Invalid patterns are blocked on save.",
+        "Tax buckets" => "Local VAT mapping for printing and offline fallback. The gateway always receives taxType, never a rate.",
+        "Corrections" => "How credit notes, debit notes and their original invoices are recognised.",
+        "Limits" => "Guard rails that stop a malformed receipt from fiscalising bad data.",
+        "Profiles" => "Apply an installed profile, import one, or save these rules for another till.",
+        "Test a receipt" => "Paste captured receipt text and read it with the draft rules before saving.",
+        _ => string.Empty
+    };
 
     private Control Body(string category) => category switch
     {
@@ -189,21 +281,20 @@ public sealed class ParseRulesPage : UserControl
             },
             Text = _draft.DefaultTaxType
         };
+        UiTheme.Input(buckets);
         buckets.SelectedValueChanged += (_, _) => _draft.DefaultTaxType = buckets.Text;
         AddRow(grid, "Default bucket", buckets);
 
         AddText(grid, "VAT-bearing marker", _draft.TaxSymbol, v => _draft.TaxSymbol = v);
         AddText(grid, "Exempt marker", _draft.NonTaxSymbol, v => _draft.NonTaxSymbol = v);
 
-        var rules = new DataGridView
-        {
-            Dock = DockStyle.Fill,
-            Height = 180,
-            AllowUserToAddRows = true,
-            AllowUserToDeleteRows = true,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-            BackgroundColor = Color.White
-        };
+        var rules = new DataGridView { Dock = DockStyle.Fill, Height = 180 };
+        UiTheme.StyleGrid(rules);
+        rules.ReadOnly = false;
+        rules.AllowUserToAddRows = true;
+        rules.AllowUserToDeleteRows = true;
+        rules.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        rules.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
         rules.Columns.Add(new DataGridViewTextBoxColumn { Name = "Bucket", HeaderText = "Tax bucket" });
         rules.Columns.Add(new DataGridViewTextBoxColumn { Name = "Markers", HeaderText = "Markers (one per line in the cell)" });
         rules.Columns.Add(new DataGridViewTextBoxColumn { Name = "Where", HeaderText = "Where (slot, annotation, section)" });
@@ -235,15 +326,12 @@ public sealed class ParseRulesPage : UserControl
         loading = false;
         AddWideRow(grid, "Marker rules (highest precedence first)", rules, 210);
 
-        var currencies = new DataGridView
-        {
-            Dock = DockStyle.Fill,
-            Height = 140,
-            AllowUserToAddRows = true,
-            AllowUserToDeleteRows = true,
-            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-            BackgroundColor = Color.White
-        };
+        var currencies = new DataGridView { Dock = DockStyle.Fill, Height = 140 };
+        UiTheme.StyleGrid(currencies);
+        currencies.ReadOnly = false;
+        currencies.AllowUserToAddRows = true;
+        currencies.AllowUserToDeleteRows = true;
+        currencies.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         currencies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Keyword", HeaderText = "Printed keyword" });
         currencies.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Currency code" });
         foreach (var currency in _draft.Currencies)
@@ -320,6 +408,7 @@ public sealed class ParseRulesPage : UserControl
             ValueMember = "Name"
         };
         combo.DataSource = _profiles.List();
+        UiTheme.Input(combo);
         if (_draft.Profile.Length > 0)
         {
             combo.SelectedValue = _draft.Profile;
@@ -328,7 +417,7 @@ public sealed class ParseRulesPage : UserControl
         AddRow(grid, "Installed profiles", combo);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
-        var apply = new Button { Text = "Use selected profile", AutoSize = true };
+        var apply = ActionButton("Use selected profile", primary: true);
         apply.Click += (_, _) =>
         {
             if (combo.SelectedValue is not string name)
@@ -353,7 +442,7 @@ public sealed class ParseRulesPage : UserControl
             }
         };
 
-        var import = new Button { Text = "Import a profile…", AutoSize = true };
+        var import = ActionButton("Import a profile…");
         import.Click += (_, _) =>
         {
             using var dialog = new OpenFileDialog { Filter = "Parse profile (*.json)|*.json" };
@@ -375,7 +464,7 @@ public sealed class ParseRulesPage : UserControl
             }
         };
 
-        var saveAs = new Button { Text = "Save these rules as a profile…", AutoSize = true };
+        var saveAs = ActionButton("Save these rules as a profile…");
         saveAs.Click += (_, _) =>
         {
             if (_draft.ValidateRules().Count > 0)
@@ -409,7 +498,7 @@ public sealed class ParseRulesPage : UserControl
             }
         };
 
-        var openFolder = new Button { Text = "Open profiles folder", AutoSize = true };
+        var openFolder = ActionButton("Open profiles folder");
         openFolder.Click += (_, _) => ShellOpen.Folder(_profiles.UserDirectory);
 
         buttons.Controls.Add(apply);
@@ -429,17 +518,20 @@ public sealed class ParseRulesPage : UserControl
         _sample.ScrollBars = ScrollBars.Vertical;
         _sample.Height = 240;
         _sample.PlaceholderText = "Paste the receipt text a print job delivered, then read it with these rules.";
+        UiTheme.Input(_sample);
         AddWideRow(grid, "Receipt text", _sample, 250);
 
         _result.Dock = DockStyle.Fill;
         _result.Multiline = true;
         _result.ReadOnly = true;
         _result.ScrollBars = ScrollBars.Vertical;
-        _result.BackColor = Color.FromArgb(248, 250, 252);
+        _result.BackColor = UiTheme.Canvas;
+        _result.ForeColor = UiTheme.Text;
+        _result.Font = UiTheme.Mono(9f);
         _result.Height = 200;
         AddWideRow(grid, "Reading", _result, 210);
 
-        var parse = new Button { Text = "Read with these rules", AutoSize = true, MinimumSize = new Size(170, 32) };
+        var parse = ActionButton("Read with these rules", primary: true);
         parse.Click += (_, _) =>
         {
             if (_sample.Text.Trim().Length == 0)
@@ -561,26 +653,72 @@ public sealed class ParseRulesPage : UserControl
         }
     }
 
-    private static TableLayoutPanel NewGrid() => new()
+    private static Button ActionButton(string text, bool primary = false)
     {
-        Dock = DockStyle.Top,
-        AutoSize = true,
-        ColumnCount = 2,
-        BackColor = Color.White
-    };
+        var button = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            MinimumSize = new Size(primary ? 132 : 104, 36),
+            Margin = new Padding(6, 0, 6, 0)
+        };
+        if (primary)
+        {
+            UiTheme.Primary(button);
+        }
+        else
+        {
+            UiTheme.Secondary(button);
+        }
+        button.Padding = new Padding(12, 0, 12, 0);
+        return button;
+    }
 
-    private static Panel Scrolled(TableLayoutPanel grid) => new()
+    private static TableLayoutPanel NewGrid()
     {
-        Dock = DockStyle.Fill,
-        AutoScroll = true,
-        Controls = { grid }
-    };
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 2,
+            BackColor = Color.Transparent
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220f));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        return grid;
+    }
+
+    private static Control Scrolled(TableLayoutPanel grid)
+    {
+        var card = new CardPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            CardBackColor = UiTheme.Surface,
+            Padding = new Padding(18, 16, 18, 16)
+        };
+        card.Controls.Add(grid);
+        return card;
+    }
+
+    private static string SafeText(string value) => value.Replace("&", "&&");
+
+    private static Label FieldLabel(string text)
+    {
+        var label = UiTheme.SectionLabel(SafeText(text));
+        label.Font = UiTheme.Ui(9f);
+        label.AutoSize = true;
+        label.MaximumSize = new Size(210, 60);
+        label.Margin = new Padding(2, 10, 10, 2);
+        label.TextAlign = ContentAlignment.MiddleLeft;
+        return label;
+    }
 
     private static void AddRow(TableLayoutPanel grid, string label, Control control)
     {
         grid.RowCount++;
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label { Text = label, AutoSize = true, Margin = new Padding(3, 7, 8, 3) }, 0, grid.RowCount - 1);
+        grid.Controls.Add(FieldLabel(label), 0, grid.RowCount - 1);
         grid.Controls.Add(control, 1, grid.RowCount - 1);
     }
 
@@ -588,9 +726,8 @@ public sealed class ParseRulesPage : UserControl
     {
         grid.RowCount++;
         grid.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
-        grid.Controls.Add(new Label { Text = label, AutoSize = true, Margin = new Padding(3, 7, 8, 3) }, 0, grid.RowCount - 1);
+        grid.Controls.Add(FieldLabel(label), 0, grid.RowCount - 1);
         grid.Controls.Add(control, 1, grid.RowCount - 1);
-        grid.SetColumnSpan(control, 1);
     }
 
     private static void AddText(TableLayoutPanel grid, string label, string value, Action<string> changed, bool multiline = false)
@@ -603,6 +740,7 @@ public sealed class ParseRulesPage : UserControl
             ScrollBars = multiline ? ScrollBars.Vertical : ScrollBars.None,
             Dock = DockStyle.Fill
         };
+        UiTheme.Input(box);
         box.TextChanged += (_, _) => changed(box.Text);
         if (multiline)
         {
@@ -624,17 +762,24 @@ public sealed class ParseRulesPage : UserControl
             ScrollBars = ScrollBars.Vertical,
             Dock = DockStyle.Fill
         };
+        UiTheme.Input(box);
         box.TextChanged += (_, _) => changed(Lines(box.Text));
         AddWideRow(grid, label, box, 84);
     }
 
     private static void AddBool(TableLayoutPanel grid, string label, bool value, Action<bool> changed)
     {
-        var box = new CheckBox { Text = label, Checked = value, AutoSize = true, Margin = new Padding(3, 7, 3, 3) };
+        var box = new CheckBox
+        {
+            Checked = value,
+            AutoSize = true,
+            Font = UiTheme.Ui(9f),
+            Margin = new Padding(2, 10, 2, 2)
+        };
         box.CheckedChanged += (_, _) => changed(box.Checked);
         grid.RowCount++;
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label { Text = " ", AutoSize = true }, 0, grid.RowCount - 1);
+        grid.Controls.Add(FieldLabel(label), 0, grid.RowCount - 1);
         grid.Controls.Add(box, 1, grid.RowCount - 1);
     }
 
@@ -650,12 +795,13 @@ public sealed class ParseRulesPage : UserControl
         var box = new NumericUpDown
         {
             Dock = DockStyle.Left,
-            Width = 160,
+            Width = 180,
             Minimum = minimum,
             Maximum = maximum,
             DecimalPlaces = decimals,
             Value = Math.Min(maximum, Math.Max(minimum, value))
         };
+        UiTheme.Input(box);
         box.ValueChanged += (_, _) => changed(box.Value);
         AddRow(grid, label, box);
     }

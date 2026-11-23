@@ -83,7 +83,7 @@ public sealed class DayReportForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
 
         var header = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Surface, Padding = new Padding(20, 12, 20, 8) };
         var title = UiTheme.Heading("Report centre");
@@ -191,28 +191,45 @@ public sealed class DayReportForm : Form
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
             BackColor = UiTheme.Surface,
-            Padding = new Padding(20, 10, 20, 8),
+            Padding = new Padding(18, 12, 18, 10),
             WrapContents = false
         };
 
-        var close = new Button { Text = "Close", Width = 88, DialogResult = DialogResult.Cancel };
-        UiTheme.Secondary(close);
+        Button ActionButton(string text, bool primary = false)
+        {
+            var button = new Button
+            {
+                Text = text,
+                AutoSize = true,
+                MinimumSize = new Size(120, 36),
+                Margin = new Padding(6, 0, 6, 0)
+            };
+            if (primary)
+            {
+                UiTheme.Primary(button);
+            }
+            else
+            {
+                UiTheme.Secondary(button);
+            }
+            button.Padding = new Padding(12, 0, 12, 0);
+            return button;
+        }
+
+        var close = ActionButton("Close");
+        close.DialogResult = DialogResult.Cancel;
         close.Click += (_, _) => CloseRequested?.Invoke(this, EventArgs.Empty);
 
-        _printReport = new Button { Text = "Print report", Width = 116 };
-        UiTheme.Secondary(_printReport);
+        _printReport = ActionButton("Print report");
         _printReport.Click += (_, _) => PrintReport();
 
-        _downloadPdf = new Button { Text = "Download PDF", Width = 130 };
-        UiTheme.Primary(_downloadPdf);
+        _downloadPdf = ActionButton("Download PDF", primary: true);
         _downloadPdf.Click += (_, _) => DownloadPdf();
 
-        var csv = new Button { Text = "Export CSV", Width = 112 };
-        UiTheme.Secondary(csv);
+        var csv = ActionButton("Export CSV");
         csv.Click += (_, _) => ExportLines();
 
-        var summary = new Button { Text = "Save TXT", Width = 100 };
-        UiTheme.Secondary(summary);
+        var summary = ActionButton("Save TXT");
         summary.Click += (_, _) => SaveSummary();
 
         actions.Controls.Add(close);

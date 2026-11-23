@@ -104,6 +104,41 @@ internal static class UiTheme
         button.BackColor = Danger;
     }
 
+    /// <summary>
+    /// One nav-button shape for the console rail and the parse-rule section rail. Dark mode
+    /// keeps the current console look; light mode gives the editor a softer, card-like rail.
+    /// </summary>
+    public static void NavButton(Button button, bool selected, bool dark = false)
+    {
+        button.FlatStyle = FlatStyle.Flat;
+        button.FlatAppearance.BorderSize = dark ? 0 : 1;
+        button.FlatAppearance.BorderColor = selected ? Accent : Border;
+        button.BackColor = dark
+            ? (selected ? Accent : NavySoft)
+            : (selected ? AccentLight : Surface);
+        button.ForeColor = dark
+            ? (selected ? Color.White : Color.FromArgb(226, 232, 240))
+            : (selected ? AccentDark : Text);
+        button.Font = Ui(9.5f, selected ? FontStyle.Bold : FontStyle.Regular);
+        button.TextAlign = ContentAlignment.MiddleLeft;
+        button.Padding = new Padding(14, 0, 10, 0);
+        button.Height = 40;
+        button.Cursor = Cursors.Hand;
+    }
+
+    /// <summary>Form controls get the same type, spacing and border as the rest of the console.</summary>
+    public static void Input(Control control)
+    {
+        control.Font = Ui(9f);
+        control.BackColor = Surface;
+        control.ForeColor = Text;
+        control.Padding = new Padding(6, 4, 6, 4);
+        if (control is TextBoxBase text)
+        {
+            text.BorderStyle = BorderStyle.FixedSingle;
+        }
+    }
+
     public static void StyleGrid(DataGridView grid)
     {
         grid.BackgroundColor = Surface;
@@ -213,14 +248,27 @@ internal sealed class CardPanel : Panel
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var bounds = new Rectangle(ClientRectangle.X, ClientRectangle.Y,
+        var outer = new Rectangle(ClientRectangle.X, ClientRectangle.Y,
             ClientRectangle.Width - 1, ClientRectangle.Height - 1);
-        if (bounds.Width <= 0 || bounds.Height <= 0)
+        if (outer.Width <= 4 || outer.Height <= 4)
         {
             return;
         }
 
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+        // WinForms has no stylesheet shadow; three translucent, offset copies give a soft
+        // bottom-right lift while staying inside the control's paint region.
+        for (var offset = 3; offset >= 1; offset--)
+        {
+            var shadowBounds = new Rectangle(outer.X + offset, outer.Y + offset,
+                outer.Width - offset, outer.Height - offset);
+            using var shadowPath = UiTheme.RoundedRectangle(shadowBounds, CornerRadius);
+            using var shadow = new SolidBrush(Color.FromArgb(9, 15, 23, 42));
+            e.Graphics.FillPath(shadow, shadowPath);
+        }
+
+        var bounds = new Rectangle(outer.X, outer.Y, outer.Width - 3, outer.Height - 3);
         using var fill = new SolidBrush(CardBackColor);
         using var border = new Pen(CardBorderColor);
         using var path = UiTheme.RoundedRectangle(bounds, CornerRadius);
