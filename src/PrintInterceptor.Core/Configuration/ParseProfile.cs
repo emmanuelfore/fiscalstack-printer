@@ -6,8 +6,9 @@ namespace PrintInterceptor.Core.Configuration;
 /// A named receipt-layout rule set, stored as a JSON file that can be shared between
 /// tills. Picking a profile writes its rules into <see cref="ParseConfig"/>, so the
 /// running configuration stays self-sufficient even if the profile file is removed.
-/// A profile describes where text is found. It cannot change what must add up: the
-/// qty × price check, the printed-total guard and the column scoring stay in the parser.
+/// A profile describes where text is found and which default tax bucket/rate the till
+/// uses; it cannot change what must add up. The qty × price check, the printed-total
+/// guard and the column scoring stay in the parser.
 /// </summary>
 public sealed class ParseProfile
 {
@@ -68,8 +69,22 @@ public sealed class ParseProfileRules
     public List<string>? ItemTableHeaderAnyOf { get; set; }
     public List<string>? ItemTableEndMarkers { get; set; }
 
-    /// <summary>Bucket for a line with no tax marker. Reading tax off the paper is layout; the rate is not.</summary>
+    /// <summary>Bucket for a line with no tax marker: STANDARD, ZERO_RATED or EXEMPT.</summary>
     public string? DefaultTaxType { get; set; }
+
+    /// <summary>
+    /// Rate used for STANDARD lines that print no percentage. A POS that prints only a VAT
+    /// amount still needs the shop's configured rate; zero-rated and exempt lines stay at 0.
+    /// </summary>
+    public double? VatRate { get; set; }
+
+    /// <summary>
+    /// Whether the POS's printed item prices already contain VAT. Written to parse.vatFlag,
+    /// so it decides both the gateway's taxInclusive flag and which price is sent: the
+    /// inclusive line total, or the ex-VAT column when one was printed. Omit it to keep the
+    /// till's existing setting; set it explicitly for a POS whose basis is known.
+    /// </summary>
+    public bool? VatInclusive { get; set; }
 
     /// <summary>The whole marker list, in precedence order. Stating it replaces the built-in list.</summary>
     public List<TaxMarkerRule>? TaxRules { get; set; }
@@ -111,6 +126,8 @@ public sealed class ParseProfileRules
         if (ItemTableEndMarkers is not null) config.ItemTableEndMarkers = ItemTableEndMarkers;
 
         if (DefaultTaxType is not null) config.DefaultTaxType = DefaultTaxType;
+        if (VatRate is not null) config.VatRate = VatRate.Value;
+        if (VatInclusive is not null) config.VatInclusive = VatInclusive.Value;
 
         // Copied rather than shared: applying a profile twice must not let a later edit
         // of the live rules reach back into the profile object it came from.

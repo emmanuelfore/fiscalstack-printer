@@ -113,36 +113,38 @@ public sealed class SecretStore
             return false;
         }
 
+        string? temp = null;
         try
         {
             Directory.CreateDirectory(_directory);
             RestrictDirectory(_directory);
 
             var path = PathFor(entry);
-            var temp = path + ".tmp";
+            // A predictable "api-key.protected.tmp" can be pre-created by another
+            // local user to hold a place in the folder. A random name also avoids
+            // colliding with a stale temp from an interrupted write.
+            temp = Path.Combine(_directory, $".{entry}.{Guid.NewGuid():N}.tmp");
             var bytes = ProtectedData.Protect(
                 System.Text.Encoding.UTF8.GetBytes(value.Trim()), Entropy, DataProtectionScope.LocalMachine);
             try
             {
-                File.WriteAllBytes(temp, bytes);
-                RestrictFile(temp);
+                using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    // Restrict the empty file before a single ciphertext byte is
+                    // written. An ACL applied afterwards leaves a window in which
+                    // the blob is readable under the folder's inherited rights.
+                    RestrictFile(temp);
+                    stream.Write(bytes);
+                    stream.Flush(flushToDisk: true);
+                }
+
                 File.Move(temp, path, overwrite: true);
                 RestrictFile(path);
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(bytes);
-                if (File.Exists(temp))
-                {
-                    try
-                    {
-                        File.Delete(temp);
-                    }
-                    catch (IOException)
-                    {
-                        // Leftover temp file holds ciphertext only; never fatal.
-                    }
-                }
+                DeleteQuietly(temp);
             }
 
             return true;
@@ -152,6 +154,30 @@ public sealed class SecretStore
             error = ex.Message;
             _log.Error($"Could not store the secret '{entry}'", ex);
             return false;
+        }
+    }
+
+    private static void DeleteQuietly(string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+            // Leftover temp file holds ciphertext only; never fatal.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // As above: no plaintext is ever in a temp file.
         }
     }
 
@@ -183,8 +209,9 @@ public sealed class SecretStore
     }
 
     /// <summary>
-    /// A form safe to write to a log or show in a window: a static prefix and the
-    /// length, never the secret itself.
+    /// A form safe to write to a log or show in a window. Only a coarse length
+    /// bucket is reported: no prefix and no exact length, either of which helps
+    /// an attacker checking a guessed key.
     /// </summary>
     public static string Describe(string? secret)
     {
@@ -193,15 +220,16 @@ public sealed class SecretStore
             return "not configured";
         }
 
-        var trimmed = secret.Trim();
-        var prefix = trimmed.Length <= 4 ? "" : trimmed[..4];
-        return $"'{prefix}…' ({trimmed.Length} characters)";
+        var length = secret.Trim().Length;
+        var bucket = length < 20 ? "short" : length < 40 ? "typical" : "long";
+        return $"configured ({bucket} length)";
     }
 
     /// <summary>
-    /// Applies the same restriction the secret blobs get to a file that still has
-    /// to hold a secret because no store is available for it - a cache written by
-    /// an older version, or a non-Windows host where DPAPI does not exist.
+    /// Applies the same restriction as a secret blob to a file that must stay
+    /// private without being a DPAPI entry — currently the offline provisioning
+    /// cache on non-Windows hosts, where DPAPI does not exist. On Windows this
+    /// calls <see cref="RestrictFile"/> and fails closed.
     /// </summary>
     public static void RestrictExistingFile(string path)
     {
@@ -222,16 +250,20 @@ public sealed class SecretStore
     }
 
     /// <summary>
-    /// Replaces inherited permissions on the secrets folder. The account this
-    /// process runs as must keep write access - it has to create and replace the
-    /// blobs in there - and authenticated users keep traversal, because a file
-    /// grant is useless if the parent folder cannot be entered; reading the blobs
-    /// is still blocked by their own ACL.
+    /// Replaces inherited permissions on a folder that holds secrets (or the
+    /// configuration). Only SYSTEM, Administrators and the account this process
+    /// runs as get access: those same trustees are granted on the files inside,
+    /// so no broader directory grant is needed for traversal.
+    /// <para>
+    /// Fails closed: a store whose ACL could not be applied must never be used.
+    /// </para>
     /// </summary>
-    private static void RestrictDirectory(string directory)
+    public static void RestrictDirectory(string directory)
     {
         if (!OperatingSystem.IsWindows())
         {
+            File.SetUnixFileMode(
+                directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             return;
         }
 
@@ -242,30 +274,30 @@ public sealed class SecretStore
             AddAllow(security, WellKnownSidType.LocalSystemSid, FileSystemRights.FullControl);
             AddAllow(security, WellKnownSidType.BuiltinAdministratorsSid, FileSystemRights.FullControl);
             AddAllowSelf(security, FileSystemRights.FullControl);
-            AddAllow(
-                security,
-                WellKnownSidType.AuthenticatedUserSid,
-                FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize);
 
             new DirectoryInfo(directory).SetAccessControl(security);
         }
         catch (Exception ex)
         {
-            // The folder stays usable; the blob ACLs below still restrict the content.
-            System.Diagnostics.Debug.WriteLine($"Could not restrict the secret folder: {ex.Message}");
+            throw new InvalidOperationException(
+                $"Could not restrict access to {directory}: {ex.Message}", ex);
         }
     }
 
     /// <summary>
-    /// Breaks inheritance on a single blob and grants it to SYSTEM, Administrators
-    /// and the account this process runs as (the till user in tray mode). The
-    /// running account gets full control so it can overwrite and delete its own
-    /// blobs; everyone else is left with nothing.
+    /// Breaks inheritance on one file and grants it only to SYSTEM, Administrators
+    /// and the account this process runs as (the till user in tray mode). Used
+    /// for both DPAPI blobs and config.json, which can hold a legacy plaintext key
+    /// until it is registered.
+    /// <para>
+    /// Fails closed: callers must not write a secret under an inherited ACL.
+    /// </para>
     /// </summary>
-    private static void RestrictFile(string path)
+    public static void RestrictFile(string path)
     {
         if (!OperatingSystem.IsWindows())
         {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
             return;
         }
 
@@ -281,9 +313,8 @@ public sealed class SecretStore
         }
         catch (Exception ex)
         {
-            // Never fail a till over a permission we could not set: the value is
-            // still DPAPI ciphertext. The installer applies the folder-wide ACL.
-            System.Diagnostics.Debug.WriteLine($"Could not restrict a secret file: {ex.Message}");
+            throw new InvalidOperationException(
+                $"Could not restrict access to {path}: {ex.Message}", ex);
         }
     }
 
@@ -316,10 +347,17 @@ public sealed class SecretStore
             return;
         }
 
+        // A file ACL cannot carry inheritance flags; passing them throws
+        // "No flags can be set" on Windows. Directories need them so newly
+        // created secrets inherit the same restriction.
+        var inheritance = security is DirectorySecurity
+            ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+            : InheritanceFlags.None;
+
         security.AddAccessRule(new FileSystemAccessRule(
             self,
             rights,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            inheritance,
             PropagationFlags.None,
             AccessControlType.Allow));
     }

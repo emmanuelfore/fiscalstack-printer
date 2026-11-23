@@ -625,7 +625,7 @@ public sealed class FiscalStackClient : IDisposable
         }
         catch (JsonException)
         {
-            // Not JSON; fall through to the raw body.
+            // Not JSON; fall through to a fingerprinted, non-PII message.
         }
 
         if (string.IsNullOrWhiteSpace(body))
@@ -633,7 +633,9 @@ public sealed class FiscalStackClient : IDisposable
             return $"HTTP {status}";
         }
 
-        return body.Length <= 500 ? body : body[..500];
+        // A gateway may echo buyer data or a proxy may return an HTML page containing
+        // the request. Keep a fingerprint for support, never the raw body in the log.
+        return $"HTTP {status}; {WithheldBody("error response", body)}";
     }
 
     /// <summary>
@@ -690,9 +692,15 @@ public sealed class FiscalStackClient : IDisposable
                 var composed = ComposeRejection(body);
                 var detail = composed ?? ExtractMessage(body) ?? $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
 
-                if ((int)response.StatusCode >= 500)
+                // 408 (request timeout), 425 (too early) and 429 (rate limited) are retries
+                // from the transport's point of view, but this is a write: the gateway may have
+                // created the receipt before it answered, so a retry here could fiscalise the
+                // sale twice. They are deliberately NOT auto-retried; reconciliation owns the
+                // retry after the invoice list has been read.
+                var ambiguousStatus = (int)response.StatusCode is >= 500 or 408 or 425 or 429;
+                if (ambiguousStatus)
                 {
-                    _log.Warn($"Fiscalisation server error ({(int)response.StatusCode}): {detail}");
+                    _log.Warn($"Fiscalisation outcome is unknown (HTTP {(int)response.StatusCode}): {detail}");
                     return new FiscalizeOutcome(FiscalizeOutcomeStatus.Ambiguous, null, detail,
                         (int)response.StatusCode);
                 }
@@ -927,8 +935,19 @@ public sealed class FiscalStackClient : IDisposable
         }
         catch (JsonException)
         {
-            return Truncate(json, 300);
+            // The first characters of a broken request can still carry buyer PII.
+            return WithheldBody("request body", json);
         }
+    }
+
+    /// <summary>
+    /// Identifies an unparseable payload without copying any of it into a log line.
+    /// The hash lets support match a gateway-side capture to this receipt.
+    /// </summary>
+    private static string WithheldBody(string kind, string body)
+    {
+        var hash = Hashing.Sha256Hex(body);
+        return $"{kind} withheld ({body.Length} chars, sha256:{hash[..12]})";
     }
 
     private static string Truncate(string? value, int max) =>
@@ -1049,9 +1068,9 @@ public sealed class FiscalStackClient : IDisposable
         }
         catch (JsonException)
         {
-            // Not JSON; return an excerpt of the raw body.
+            // Not JSON; the raw body may contain PII, so keep only a fingerprint.
         }
 
-        return body.Length <= 500 ? body : body[..500];
+        return WithheldBody("error response", body);
     }
 }

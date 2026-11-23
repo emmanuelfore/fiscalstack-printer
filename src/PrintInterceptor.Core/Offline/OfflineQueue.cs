@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using PrintInterceptor.Core.Diagnostics;
 using PrintInterceptor.Core.Fiscalisation;
+using PrintInterceptor.Core.State;
 
 namespace PrintInterceptor.Core.Offline;
 
@@ -54,6 +55,7 @@ public sealed class OfflineQueue
     private readonly object _gate = new();
     private readonly string _directory;
     private readonly string _failedDirectory;
+    private readonly string _recoveryDirectory;
     private readonly string _pausePath;
     private readonly ILog _log;
     private OfflinePause? _pause;
@@ -64,13 +66,30 @@ public sealed class OfflineQueue
         _log = log;
         _directory = Path.Combine(stateDirectory, "offline-queue");
         _failedDirectory = Path.Combine(stateDirectory, "offline-failed");
+        _recoveryDirectory = Path.Combine(stateDirectory, "offline-recovery");
         _pausePath = Path.Combine(stateDirectory, "offline-sync-pause.json");
         Directory.CreateDirectory(_directory);
         Directory.CreateDirectory(_failedDirectory);
+        Directory.CreateDirectory(_recoveryDirectory);
         _pause = LoadPause();
+
+        // Recovery is deliberately not run here. A signed receipt must only be
+        // re-admitted once the caller has supplied the committed chain state;
+        // otherwise a record written just before a failed chain commit would be
+        // submitted with a counter that was never spent.
     }
 
+    /// <summary>
+    /// Supplies the durable chain state used to decide whether a recovery record
+    /// represents a committed receipt or a signing attempt that never committed.
+    /// Set once during pipeline construction before RecoverPending is called.
+    /// </summary>
+    public Func<FiscalChainSnapshot?>? ChainProvider { get; set; }
+
     public string DirectoryPath => _directory;
+
+    /// <summary>Where signed receipts go when the queue write itself fails.</summary>
+    public string RecoveryDirectoryPath => _recoveryDirectory;
 
     public bool IsPaused
     {
@@ -168,27 +187,262 @@ public sealed class OfflineQueue
 
     public bool TryEnqueue(OfflineQueueItem item, out string error)
     {
+        // Read the chain before taking the queue lock. Signing holds the chain lock
+        // while it asks us to protect a receipt, so the reverse order would deadlock.
+        var chain = ChainProvider?.Invoke();
         lock (_gate)
         {
+            // Any earlier receipt that was signed but could not be queued owns the next
+            // counters, so it goes back into the FIFO before this one.
+            RecoverPendingLocked(chain);
+            return TryEnqueueLocked(item, out error);
+        }
+    }
+
+    /// <summary>
+    /// Writes a signed receipt to durable storage while the chain lock is held, before the
+    /// counter is persisted. The record is moved into the FIFO after the chain commits; a
+    /// crash in between is recovered by comparing its number with the committed chain.
+    /// </summary>
+    public bool TrySaveRecovery(OfflineQueueItem item, out string path, out string error)
+    {
+        lock (_gate)
+        {
+            path = "";
             try
             {
-                var stamp = item.CreatedAt == default ? DateTimeOffset.Now : item.CreatedAt;
-                var sequence = Interlocked.Increment(ref _sequence).ToString("D6");
-                var path = Path.Combine(
-                    _directory,
-                    $"{stamp:yyyyMMddHHmmssfff}-{sequence}-{Short(item.JobHash)}.json");
-
+                Directory.CreateDirectory(_recoveryDirectory);
+                path = Path.Combine(
+                    _recoveryDirectory,
+                    $"{DateTimeOffset.Now:yyyyMMddHHmmssfff}-{Short(item.JobHash)}-{Guid.NewGuid():N}.json");
                 WriteAtomic(path, item);
-                item.FilePath = path;
                 error = "";
                 return true;
             }
             catch (Exception ex)
             {
-                _log.Error("Could not queue the offline receipt", ex);
+                path = "";
                 error = ex.Message;
+                _log.Error("Could not protect the signed offline receipt before committing its counter", ex);
                 return false;
             }
+        }
+    }
+
+    /// <summary>Promotes a committed recovery record into the FIFO in one atomic move.</summary>
+    public bool PromoteRecovery(string path, out string error)
+    {
+        lock (_gate)
+        {
+            error = "";
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    error = "The protected signed receipt disappeared before it could be queued.";
+                    return false;
+                }
+
+                var item = JsonSerializer.Deserialize<OfflineQueueItem>(File.ReadAllText(path), JsonOptions)
+                           ?? throw new InvalidOperationException("recovery file is empty");
+                if (QueueHasLocked(item, out var corrupt))
+                {
+                    TryDelete(path);
+                    return true;
+                }
+
+                if (corrupt)
+                {
+                    error = "An existing queue file could not be read, so the recovery record was kept.";
+                    return false;
+                }
+
+                File.Move(path, QueuePath(item), overwrite: false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                _log.Error($"Could not queue the protected offline receipt {Path.GetFileName(path)}", ex);
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Discards a recovery record whose chain counter was never committed.</summary>
+    public void DiscardRecovery(string path)
+    {
+        lock (_gate)
+        {
+            TryDelete(path);
+        }
+    }
+
+    /// <summary>
+    /// Re-admits signed receipts whose enqueue or chain promotion was interrupted. A record
+    /// whose global number is ahead of the chain belongs to a signing attempt that never
+    /// committed and is discarded; a committed record is moved into the FIFO. A successful
+    /// recovery is one File.Move, so a crash cannot leave two submissions of the same receipt.
+    /// </summary>
+    public int RecoverPending()
+    {
+        // Read the chain before taking the queue lock to keep lock order consistent
+        // with the signing path (chain -> queue).
+        var chain = ChainProvider?.Invoke();
+        lock (_gate)
+        {
+            return RecoverPendingLocked(chain);
+        }
+    }
+
+    private int RecoverPendingLocked(FiscalChainSnapshot? chain)
+    {
+        if (chain is null)
+        {
+            _log.Error("The offline fiscal chain is unavailable; signed receipts stay in recovery until it can be read.");
+            return 0;
+        }
+
+        var recovered = 0;
+        if (!Directory.Exists(_recoveryDirectory))
+        {
+            return recovered;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_recoveryDirectory, "*.json")
+                     .OrderBy(name => name, StringComparer.Ordinal).ToList())
+        {
+            OfflineQueueItem item;
+            try
+            {
+                item = JsonSerializer.Deserialize<OfflineQueueItem>(File.ReadAllText(path), JsonOptions)
+                       ?? throw new InvalidOperationException("file is empty");
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"Could not read the recovered offline receipt {Path.GetFileName(path)}", ex);
+                continue;
+            }
+
+            if (chain is not null && item.ReceiptGlobalNo > chain.ReceiptGlobalNo)
+            {
+                TryDelete(path);
+                _log.Warn(
+                    $"Discarded an uncommitted offline signing attempt for {Short(item.JobHash)} " +
+                    $"(global {item.ReceiptGlobalNo}, chain {chain.ReceiptGlobalNo}); no counter was spent.");
+                continue;
+            }
+
+            try
+            {
+                if (QueueHasLocked(item, out var corrupt))
+                {
+                    if (!corrupt)
+                    {
+                        TryDelete(path);
+                    }
+                    else
+                    {
+                        _log.Error(
+                            $"A queue file could not be read while recovering {Short(item.JobHash)}; " +
+                            "the recovery record was kept.");
+                    }
+                    continue;
+                }
+
+                File.Move(path, QueuePath(item), overwrite: false);
+                recovered++;
+            }
+            catch (Exception ex)
+            {
+                _log.Error($"Could not re-queue the recovered offline receipt {Path.GetFileName(path)}", ex);
+            }
+        }
+
+        if (recovered > 0)
+        {
+            _log.Warn($"{recovered} signed offline receipt(s) were recovered into the sync queue.");
+        }
+
+        return recovered;
+    }
+
+    private bool QueueHasLocked(OfflineQueueItem item, out bool corrupt)
+    {
+        corrupt = false;
+        foreach (var path in Directory.EnumerateFiles(_directory, "*.json"))
+        {
+            OfflineQueueItem existing;
+            try
+            {
+                existing = JsonSerializer.Deserialize<OfflineQueueItem>(File.ReadAllText(path), JsonOptions)
+                           ?? throw new InvalidOperationException("queue file is empty");
+            }
+            catch
+            {
+                corrupt = true;
+                return false;
+            }
+
+            if (string.Equals(existing.JobHash, item.JobHash, StringComparison.Ordinal) &&
+                existing.ReceiptGlobalNo == item.ReceiptGlobalNo)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryEnqueueLocked(OfflineQueueItem item, out string error)
+    {
+        try
+        {
+            var path = QueuePath(item);
+            WriteAtomic(path, item);
+            item.FilePath = path;
+            error = "";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Could not queue the offline receipt", ex);
+            WriteRecoveryLocked(item);
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private string QueuePath(OfflineQueueItem item)
+    {
+        var stamp = item.CreatedAt == default ? DateTimeOffset.Now : item.CreatedAt;
+        var sequence = Interlocked.Increment(ref _sequence).ToString("D6");
+        return Path.Combine(
+            _directory,
+            $"{stamp:yyyyMMddHHmmssfff}-{sequence}-{Short(item.JobHash)}.json");
+    }
+
+    /// <summary>
+    /// The chain has already advanced and the receipt is signed: losing it here would skip a
+    /// ZIMRA counter permanently. Keep the exact signed body so the next enqueue or sync pass
+    /// can put it back without re-signing it.
+    /// </summary>
+    private void WriteRecoveryLocked(OfflineQueueItem item)
+    {
+        try
+        {
+            Directory.CreateDirectory(_recoveryDirectory);
+            var path = Path.Combine(
+                _recoveryDirectory,
+                $"{DateTimeOffset.Now:yyyyMMddHHmmssfff}-{Short(item.JobHash)}-{Guid.NewGuid():N}.json");
+            WriteAtomic(path, item);
+            _log.Warn(
+                $"Signed offline receipt {Short(item.JobHash)} was kept for recovery at {path}; " +
+                "no counter was skipped and it will be re-queued before the next sync.");
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Could not save the signed offline receipt for recovery", ex);
         }
     }
 
@@ -310,6 +564,22 @@ public sealed class OfflineQueue
                 Reason = $"The offline-sync pause marker is unreadable: {ex.Message}",
                 PausedAt = DateTimeOffset.Now
             };
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // A locked file is recovered on the next pass; never fail a queue
+            // operation just because cleanup could not run.
         }
     }
 

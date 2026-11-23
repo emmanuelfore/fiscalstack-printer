@@ -28,6 +28,7 @@ public sealed class SettingsForm : Form
     private readonly NumericUpDown _paperWidth;
     private readonly ComboBox _profile;
     private readonly Label _profileNote;
+    private readonly CheckBox _vatInclusive;
     private readonly CheckBox _offlineEnabled;
     private readonly Button _refresh;
     private readonly Label _status;
@@ -178,6 +179,13 @@ public sealed class SettingsForm : Form
         profileHost.Controls.Add(_profileNote, 0, 1);
         _profile.SelectedIndexChanged += (_, _) => ShowProfileNote();
 
+        _vatInclusive = new CheckBox
+        {
+            Text = "Printed prices include VAT (turn off for ex-VAT columns)",
+            Checked = config.Parse.VatInclusive,
+            AutoSize = true
+        };
+
         _offlineEnabled = new CheckBox
         {
             Text = "Sign receipts offline when the API is unreachable",
@@ -242,6 +250,7 @@ public sealed class SettingsForm : Form
         AddRow(table, "Paper width (mm)", _paperWidth);
         AddRow(table, "", Separator("Receipt parsing profile"));
         AddRow(table, "Layout rules", profileHost);
+        AddRow(table, "Pricing basis", _vatInclusive);
         AddRow(table, "", Separator("Offline fiscalisation"));
         AddRow(table, "", _offlineEnabled);
         AddRow(table, "", _refresh);
@@ -258,7 +267,7 @@ public sealed class SettingsForm : Form
                    "buckets, QR base URL and receipt counters come from /api/zimra/offline-state, and the " +
                    "private key is cached in the same encrypted store.\n" +
                    "A new key or endpoint applies to the very next receipt; printing changes apply on save. " +
-                   "Only enabling offline signing, or a different API timeout, needs a restart."
+                   "A parsing profile or pricing basis takes effect after a restart, as do offline signing and API timeout changes."
         };
         table.Controls.Add(new Label(), 0, table.RowCount);
         table.Controls.Add(note, 1, table.RowCount);
@@ -610,6 +619,7 @@ public sealed class SettingsForm : Form
         try
         {
             var profile = _profiles.Apply(choice.Value, _config);
+            _vatInclusive.Checked = _config.Parse.VatInclusive;
             _config.Save();
             _log.Info($"Receipt parsing now uses profile '{profile.Name}' from {profile.FilePath}; " +
                       "the rules were written to the configuration file.");
@@ -807,6 +817,7 @@ public sealed class SettingsForm : Form
         _config.Printing.PrinterName = ReadPrinterSelection(_printerName);
         _config.Printing.A4PrinterName = ReadPrinterSelection(_a4PrinterName);
         _config.Printing.PaperWidthMm = (int)_paperWidth.Value;
+        _config.Parse.VatInclusive = _vatInclusive.Checked;
         _config.Offline.Enabled = _offlineEnabled.Checked;
         _config.SetupCompleted = true;
 

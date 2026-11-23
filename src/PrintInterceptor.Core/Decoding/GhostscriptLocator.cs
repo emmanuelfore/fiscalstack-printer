@@ -7,6 +7,11 @@ namespace PrintInterceptor.Core.Decoding;
 /// Finds a usable Ghostscript executable and the resource folders that belong to
 /// it. Shared by text extraction and page rasterising so both routes resolve the
 /// copy the same way.
+///
+/// Only bundled copies and OS-managed install folders are trusted. A configured
+/// path, a PATH entry or a symlink that resolves into a user-writable folder is
+/// rejected: Ghostscript parses untrusted print jobs and must not be replaceable
+/// by whoever last wrote to a temp or profile directory.
 /// </summary>
 public static class GhostscriptLocator
 {
@@ -14,26 +19,97 @@ public static class GhostscriptLocator
         ? new[] { "gswin64c.exe", "gswin32c.exe" }
         : new[] { "gs" };
 
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
+
     /// <summary>
-    /// Configured path, then a Ghostscript bundled next to the executable
-    /// (build-release.ps1 bundles it unless run with -NoGhostscript), then PATH, then
-    /// Program Files. A configured path that no longer exists falls through instead of
-    /// failing, because installers write absolute paths that outlive the layout they came
-    /// from.
+    /// Configured trusted path (for installers), then the bundled copy, then a
+    /// trusted Program Files install (or OS folders on Linux), then trusted PATH
+    /// entries. A configured path that was rejected or no longer exists falls
+    /// through instead of failing, because installers write absolute paths that
+    /// outlive the layout they came from.
     /// </summary>
     public static string? Resolve(InterceptorConfig config, ILog? log = null)
     {
         if (!string.IsNullOrWhiteSpace(config.GhostscriptPath))
         {
-            if (File.Exists(config.GhostscriptPath))
+            if (IsTrustedExecutable(config.GhostscriptPath))
             {
-                return config.GhostscriptPath;
+                return Path.GetFullPath(config.GhostscriptPath);
             }
 
-            log?.Error($"Configured ghostscriptPath does not exist: {config.GhostscriptPath}. Searching for another copy.");
+            log?.Error($"Configured ghostscriptPath was rejected: '{config.GhostscriptPath}' " +
+                       "is not inside the application folder or a trusted system install.");
         }
 
-        return FindBundled() ?? FindOnPath() ?? (OperatingSystem.IsWindows() ? FindInProgramFiles() : null);
+        return FindBundled()
+            ?? (OperatingSystem.IsWindows() ? FindInProgramFiles() : null)
+            ?? FindOnPathTrusted();
+    }
+
+    /// <summary>Used by <see cref="GhostscriptRunner"/> as a second gate before Process.Start.</summary>
+    internal static bool IsTrustedExecutable(string path)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return false;
+            }
+
+            var full = Path.GetFullPath(path);
+            // A symlink or junction in a trusted folder must not point at a
+            // user-writable binary, whether the link is on the file or its folder.
+            var fileTarget = new FileInfo(full).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
+            var parent = Path.GetDirectoryName(full);
+            var dirTarget = parent is null
+                ? null
+                : new DirectoryInfo(parent).ResolveLinkTarget(returnFinalTarget: true)?.FullName;
+            var effective = fileTarget
+                ?? (dirTarget is null ? full : Path.Combine(dirTarget, Path.GetFileName(full)));
+            return TrustedRoots().Any(root => effective.StartsWith(root, PathComparison));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<string> TrustedRoots()
+    {
+        yield return WithSeparator(AppContext.BaseDirectory);
+
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var root in new[]
+                     {
+                         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                         Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+                     })
+            {
+                if (!string.IsNullOrWhiteSpace(root))
+                {
+                    yield return WithSeparator(root);
+                }
+            }
+        }
+        else
+        {
+            // Root-owned system trees; /usr covers bin, lib and local.
+            foreach (var root in new[] { "/usr", "/opt" })
+            {
+                yield return WithSeparator(root);
+            }
+        }
+    }
+
+    private static string WithSeparator(string path)
+    {
+        var full = Path.GetFullPath(path);
+        return full.EndsWith(Path.DirectorySeparatorChar) || full.EndsWith(Path.AltDirectorySeparatorChar)
+            ? full
+            : full + Path.DirectorySeparatorChar;
     }
 
     /// <summary>
@@ -67,7 +143,7 @@ public static class GhostscriptLocator
         foreach (var name in ExecutableNames)
         {
             var candidate = Path.Combine(AppContext.BaseDirectory, "ghostscript", "bin", name);
-            if (File.Exists(candidate))
+            if (IsTrustedExecutable(candidate))
             {
                 return candidate;
             }
@@ -76,7 +152,7 @@ public static class GhostscriptLocator
         return null;
     }
 
-    private static string? FindOnPath()
+    private static string? FindOnPathTrusted()
     {
         var path = Environment.GetEnvironmentVariable("PATH");
         if (string.IsNullOrWhiteSpace(path))
@@ -91,7 +167,7 @@ public static class GhostscriptLocator
                 try
                 {
                     var candidate = Path.Combine(dir.Trim(), name);
-                    if (File.Exists(candidate))
+                    if (IsTrustedExecutable(candidate))
                     {
                         return candidate;
                     }
@@ -134,7 +210,7 @@ public static class GhostscriptLocator
                 .Where(x => x.Version is not null)
                 .OrderByDescending(x => x.Version)
                 .SelectMany(x => ExecutableNames.Select(name => Path.Combine(x.Dir, "bin", name)))
-                .FirstOrDefault(File.Exists);
+                .FirstOrDefault(IsTrustedExecutable);
 
             if (best is not null)
             {

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PrintInterceptor.Core.Configuration;
 using Xunit;
 
@@ -18,6 +19,7 @@ public class InterceptorConfigTests
         Assert.Equal(9100, config.ListenPort);
         Assert.EndsWith("/", config.ApiEndpoint);
         Assert.Equal("1", config.Parse.VatFlag);
+        Assert.True(config.Parse.VatInclusive);
         Assert.NotEmpty(config.Parse.Currencies);
         Assert.True(config.SetupCompleted);
     }
@@ -288,4 +290,107 @@ public class InterceptorConfigTests
         Assert.Equal(builtIn.MaxAttempts, example.MaxAttempts);
         Assert.Equal(builtIn.ScanPages, example.ScanPages);
     }
+
+    [Fact]
+    public void SaveDoesNotPersistOrMutateTheApiKey()
+    {
+        const string key = "sk_live_do_not_persist_1234567890";
+        var directory = NewTempDirectory();
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            var config = new InterceptorConfig
+            {
+                ConfigPath = path,
+                ApiKey = key,
+                Parse = new ParseConfig { VatFlag = "0" }
+            };
+
+            config.Save();
+
+            // The live object keeps the runtime key; serialisation used a copy.
+            Assert.Equal(key, config.ApiKey);
+            Assert.False(config.Parse.VatInclusive);
+
+            var json = File.ReadAllText(path);
+            Assert.DoesNotContain(key, json);
+            using (var document = JsonDocument.Parse(json))
+            {
+                Assert.Equal("", document.RootElement.GetProperty("apiKey").GetString());
+                Assert.Equal("0", document.RootElement.GetProperty("parse").GetProperty("vatFlag").GetString());
+            }
+
+            var reloaded = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("0", reloaded.Parse.VatFlag);
+            Assert.False(reloaded.Parse.VatInclusive);
+            Assert.Empty(reloaded.ApiKey);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SavePreservesBothViewsOfTheVatFlag()
+    {
+        var directory = NewTempDirectory();
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            var config = new InterceptorConfig { ConfigPath = path };
+            config.Parse.VatInclusive = false;
+            config.Save();
+
+            var reloaded = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("0", reloaded.Parse.VatFlag);
+            Assert.False(reloaded.Parse.VatInclusive);
+
+            reloaded.Parse.VatInclusive = true;
+            reloaded.Save();
+
+            var reloadedAgain = InterceptorConfig.LoadOrCreate(path);
+            Assert.Equal("1", reloadedAgain.Parse.VatFlag);
+            Assert.True(reloadedAgain.Parse.VatInclusive);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SaveReplacesTheFileWithoutLeavingATemporaryFile()
+    {
+        var directory = NewTempDirectory();
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            var config = new InterceptorConfig { ConfigPath = path, ApiKey = "sk_test_example" };
+            config.Save();
+
+            Assert.True(File.Exists(path));
+            Assert.Empty(Directory.GetFiles(directory, "*.tmp", SearchOption.AllDirectories));
+            Assert.Empty(InterceptorConfig.LoadOrCreate(path).Validate());
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    private static string NewTempDirectory() =>
+        Path.Combine(Path.GetTempPath(), "printinterceptor-tests-" + Guid.NewGuid().ToString("N"));
 }

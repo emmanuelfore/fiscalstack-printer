@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using PrintInterceptor.Core.Configuration;
 using PrintInterceptor.Core.Diagnostics;
@@ -22,6 +23,11 @@ public enum OfflineKeySource
 /// </summary>
 public sealed class OfflineReceiptService : IDisposable
 {
+    private const string ProtectedProvisioningRequired =
+        "Offline signing requires the protected ZIMRA device key. Go online and use " +
+        "Settings -> Refresh from FiscalStack (then restart) so the key is stored with DPAPI; " +
+        "plaintext provisioning-cache keys are no longer accepted.";
+
     private static readonly JsonSerializerOptions CacheJson = new()
     {
         WriteIndented = true,
@@ -45,8 +51,9 @@ public sealed class OfflineReceiptService : IDisposable
     private DateTimeOffset? _provisionedAt;
 
     /// <param name="secrets">
-    /// Store for the device private key. When it is unavailable the key stays in
-    /// the provisioning cache as it did before, with the file ACL restricted.
+    /// Required when offline signing is enabled. The ZIMRA private key is a
+    /// credential and is only accepted from the DPAPI store; the plaintext
+    /// provisioning-cache fallback has been removed.
     /// </param>
     public OfflineReceiptService(
         InterceptorConfig config,
@@ -62,6 +69,14 @@ public sealed class OfflineReceiptService : IDisposable
 
         if (!config.Offline.Enabled)
         {
+            return;
+        }
+
+        if (_secrets is null || !SecretStore.Supported)
+        {
+            _configurationError = ProtectedProvisioningRequired;
+            _log.Warn(_configurationError);
+            ScrubLegacyCacheKey();
             return;
         }
 
@@ -140,7 +155,16 @@ public sealed class OfflineReceiptService : IDisposable
         }
     }
 
-    public bool TryIssue(ParsedReceipt receipt, out OfflineSignedReceipt signed, out string error)
+    /// <summary>
+    /// Signs the next offline receipt. The optional beforeCommit callback runs
+    /// under the chain lock before the counter is persisted, so a caller can keep
+    /// the signed receipt durably without leaving a gap in the ZIMRA sequence.
+    /// </summary>
+    public bool TryIssue(
+        ParsedReceipt receipt,
+        out OfflineSignedReceipt signed,
+        out string error,
+        Func<OfflineSignedReceipt, (bool Ok, string Error)>? beforeCommit = null)
     {
         signed = null!;
         if (!Enabled)
@@ -180,14 +204,15 @@ public sealed class OfflineReceiptService : IDisposable
                     FiscalDayNo = snapshot.FiscalDayNo,
                     PreviousHash = snapshot.LastHash,
                     Items = receipt.Items,
-                    TaxInclusive = string.Equals(_config.Parse.VatFlag.Trim(), "1", StringComparison.Ordinal),
+                    TaxInclusive = _config.Parse.VatInclusive,
                     Taxes = taxes,
                     StandardTaxPercent = EffectiveStandardPercent,
                     QrBaseUrl = EffectiveQrBaseUrl
                 },
                 key),
             out signed,
-            out error);
+            out error,
+            beforeCommit);
 
         if (!issued)
         {
@@ -237,6 +262,13 @@ public sealed class OfflineReceiptService : IDisposable
             return false;
         }
 
+        if (_secrets is null || !SecretStore.Supported)
+        {
+            _configurationError = ProtectedProvisioningRequired;
+            _log.Warn(_configurationError);
+            return false;
+        }
+
         var state = await client.GetOfflineStateAsync(cancellationToken);
         if (state is null)
         {
@@ -244,17 +276,91 @@ public sealed class OfflineReceiptService : IDisposable
             return false;
         }
 
-        if (!ApplyState(state, fromCache: false, string.IsNullOrWhiteSpace(state.ZimraPrivateKey) ? _remoteKeyPem : state.ZimraPrivateKey))
+        var keyPem = string.IsNullOrWhiteSpace(state.ZimraPrivateKey) ? _remoteKeyPem : state.ZimraPrivateKey;
+        if (string.IsNullOrWhiteSpace(keyPem))
+        {
+            _configurationError = "FiscalStack returned no device private key for offline signing.";
+            _log.Warn(_configurationError);
+            return false;
+        }
+
+        // Protect the key first. If the store refuses the write, no state is
+        // adopted and the cache never becomes the fallback key holder.
+        if (!_secrets.TrySet(SecretStore.DeviceKeyEntry, keyPem, out var secretError))
+        {
+            _configurationError =
+                "Offline provisioning could not be protected in the DPAPI secret store: " + secretError +
+                ". Check the secrets folder ACL, go online and press Refresh from FiscalStack again; " +
+                "plaintext caching is disabled.";
+            _log.Warn(_configurationError);
+            return false;
+        }
+
+        if (!ApplyState(state, fromCache: false, keyPem))
         {
             return false;
         }
 
         _provisionedAt = DateTimeOffset.Now;
-        PersistCache(state, _remoteKeyPem);
+        PersistCache(state);
         return true;
     }
 
     private void LoadCachedProvisioning()
+    {
+        if (!File.Exists(_cachePath))
+        {
+            _configurationError =
+                "Offline provisioning has not been cached yet. Go online and use Settings -> Refresh from FiscalStack, then restart.";
+            return;
+        }
+
+        // A cache written by an older version may still carry the private key in
+        // clear text. It is never a key source; strip it so a support bundle of
+        // the data folder stops carrying a signing credential.
+        ScrubLegacyCacheKey();
+
+        try
+        {
+            var cache = JsonSerializer.Deserialize<ProvisioningCache>(File.ReadAllText(_cachePath), CacheJson);
+            if (cache is null)
+            {
+                _configurationError = "The cached offline provisioning could not be read. " +
+                                      "Go online and use Settings -> Refresh from FiscalStack, then restart.";
+                return;
+            }
+
+            if (!_secrets!.TryGet(SecretStore.DeviceKeyEntry, out var storedKey) ||
+                string.IsNullOrWhiteSpace(storedKey))
+            {
+                _configurationError = ProtectedProvisioningRequired;
+                _log.Warn(_configurationError);
+                return;
+            }
+
+            if (!ApplyState(cache.State, fromCache: true, storedKey))
+            {
+                return;
+            }
+
+            _provisionedAt = cache.FetchedAt;
+            _log.Info(
+                $"Offline provisioning restored from cache: device={EffectiveDeviceId} " +
+                $"day={cache.State.CurrentFiscalDayNo} counter={cache.State.DailyReceiptCount} " +
+                $"global={cache.State.LastReceiptGlobalNo}.");
+        }
+        catch (Exception ex)
+        {
+            _configurationError = $"Could not load protected offline provisioning: {ex.Message}";
+            _log.Warn(_configurationError);
+        }
+    }
+
+    /// <summary>
+    /// Removes a private key left in the provisioning cache by an older build.
+    /// The cache is state only; the key lives in the DPAPI store.
+    /// </summary>
+    private void ScrubLegacyCacheKey()
     {
         if (!File.Exists(_cachePath))
         {
@@ -263,68 +369,75 @@ public sealed class OfflineReceiptService : IDisposable
 
         try
         {
-            var cache = JsonSerializer.Deserialize<ProvisioningCache>(File.ReadAllText(_cachePath), CacheJson);
-            if (cache is null)
+            var node = JsonNode.Parse(File.ReadAllText(_cachePath));
+            if (node is not JsonObject obj)
             {
                 return;
             }
 
-            // The key belongs in the secret store; a value still present in the
-            // cache was written by an older version and is migrated below.
-            var storedKey = _secrets is not null && _secrets.TryGet(SecretStore.DeviceKeyEntry, out var value)
-                ? value
-                : null;
-            var keyPem = storedKey ?? cache.PrivateKeyPem;
-            if (string.IsNullOrWhiteSpace(keyPem))
+            var hadCamelCase = obj.Remove("privateKeyPem");
+            var hadPascalCase = obj.Remove("PrivateKeyPem");
+            if (obj["state"] is JsonObject stateNode)
+            {
+                hadCamelCase |= stateNode.Remove("zimraPrivateKey");
+                hadPascalCase |= stateNode.Remove("ZimraPrivateKey");
+            }
+
+            if (!hadCamelCase && !hadPascalCase)
             {
                 return;
             }
 
-            if (!ApplyState(cache.State, fromCache: true, keyPem))
-            {
-                return;
-            }
-
-            _provisionedAt = cache.FetchedAt;
-            if (storedKey is null && _secrets is not null)
-            {
-                MigrateCachedKey(cache.State, keyPem!);
-            }
-
-            _log.Info(
-                $"Offline provisioning restored from cache: device={EffectiveDeviceId} " +
-                $"day={cache.State.CurrentFiscalDayNo} counter={cache.State.DailyReceiptCount} " +
-                $"global={cache.State.LastReceiptGlobalNo}.");
+            WriteCacheJson(node.ToJsonString());
+            _log.Warn(
+                "Removed a legacy plaintext ZIMRA device key from the offline provisioning cache; " +
+                "it is not used for signing.");
         }
         catch (Exception ex)
         {
-            _log.Warn($"Could not read the cached offline provisioning: {ex.Message}");
+            _log.Warn($"Could not remove a legacy device key from the offline provisioning cache: {ex.Message}");
         }
     }
 
-    /// <summary>
-    /// Moves a device private key out of the plaintext provisioning cache into the
-    /// secret store and rewrites the cache without it. The ZIMRA signing key is the
-    /// credential that makes a till able to issue receipts, so it must not survive
-    /// in a folder that gets copied into a support bundle.
-    /// </summary>
-    private void MigrateCachedKey(OfflineState state, string keyPem)
+    private void WriteCacheJson(string json)
     {
-        if (_secrets is null)
+        var directory = Path.GetDirectoryName(_cachePath);
+        if (!string.IsNullOrEmpty(directory))
         {
-            return;
+            Directory.CreateDirectory(directory);
         }
 
-        if (!_secrets.TrySet(SecretStore.DeviceKeyEntry, keyPem, out var error))
+        var temp = _cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
         {
-            _log.Warn($"The cached device private key could not be moved to the secret store: {error}");
-            return;
-        }
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false)))
+            {
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
 
-        PersistCache(state, keyPem);
-        _log.Info(
-            $"The ZIMRA device private key was moved into the secret store at {_secrets.DirectoryPath}; " +
-            "the provisioning cache no longer contains it.");
+            SecretStore.RestrictExistingFile(temp);
+            File.Move(temp, _cachePath, overwrite: true);
+            SecretStore.RestrictExistingFile(_cachePath);
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(temp))
+                {
+                    File.Delete(temp);
+                }
+            }
+            catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException)
+            {
+                // Cache holds fiscal state only; no signing key is ever written here.
+            }
+
+            throw;
+        }
     }
 
     private bool ApplyState(OfflineState state, bool fromCache, string? keyPem)
@@ -375,55 +488,45 @@ public sealed class OfflineReceiptService : IDisposable
         return true;
     }
 
-    private void PersistCache(OfflineState state, string? keyPem)
+    /// <summary>
+    /// Caches only device state: id, serial, tax buckets, counters and the fiscal
+    /// hash. The private key never reaches this file; a store write failure is
+    /// handled by RefreshStateAsync before the state is adopted.
+    /// </summary>
+    private void PersistCache(OfflineState state)
     {
-        if (string.IsNullOrWhiteSpace(keyPem))
-        {
-            return;
-        }
-
         try
         {
-            var directory = Path.GetDirectoryName(_cachePath);
-            if (!string.IsNullOrEmpty(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            // Only the non-secret half is kept here: device id, fiscal day and
-            // counters. The key goes to the store when one is available.
-            var storedInSecrets = false;
-            if (_secrets is not null)
-            {
-                storedInSecrets = _secrets.TrySet(SecretStore.DeviceKeyEntry, keyPem, out var secretError);
-                if (!storedInSecrets)
-                {
-                    _log.Warn(
-                        "The device private key could not be stored securely and will be cached in the file: " +
-                        secretError);
-                }
-            }
-
             var json = JsonSerializer.Serialize(
-                new ProvisioningCache
-                {
-                    State = state,
-                    PrivateKeyPem = storedInSecrets ? null : keyPem,
-                    FetchedAt = DateTimeOffset.Now
-                },
-                CacheJson);
-
-            var temp = _cachePath + ".tmp";
-            File.WriteAllText(temp, json);
-            SecretStore.RestrictExistingFile(temp);
-            File.Move(temp, _cachePath, overwrite: true);
-            SecretStore.RestrictExistingFile(_cachePath);
+                new { State = WithoutPrivateKey(state), FetchedAt = DateTimeOffset.Now }, CacheJson);
+            WriteCacheJson(json);
         }
         catch (Exception ex)
         {
             _log.Warn($"Could not cache the offline provisioning: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// The API's state object includes the private key. It is already in the
+    /// secret store by the time state is cached, so strip it from the copy.
+    /// </summary>
+    private static OfflineState WithoutPrivateKey(OfflineState state) => new()
+    {
+        DeviceId = state.DeviceId,
+        DeviceSerialNo = state.DeviceSerialNo,
+        ZimraEnvironment = state.ZimraEnvironment,
+        QrUrl = state.QrUrl,
+        ZimraPrivateKey = null,
+        ZimraCertificate = state.ZimraCertificate,
+        LastFiscalHash = state.LastFiscalHash,
+        CurrentFiscalDayNo = state.CurrentFiscalDayNo,
+        FiscalDayOpen = state.FiscalDayOpen,
+        FiscalDayOpenedAt = state.FiscalDayOpenedAt,
+        DailyReceiptCount = state.DailyReceiptCount,
+        LastReceiptGlobalNo = state.LastReceiptGlobalNo,
+        Taxes = state.Taxes
+    };
 
     private static List<OfflineTaxConfig> MapTaxes(OfflineStateTaxes? taxes)
     {
@@ -485,7 +588,10 @@ public sealed class OfflineReceiptService : IDisposable
     private sealed class ProvisioningCache
     {
         public OfflineState State { get; set; } = new();
+
+        /// <summary>Legacy only: recognised so it can be scrubbed, never used as a key.</summary>
         public string? PrivateKeyPem { get; set; }
+
         public DateTimeOffset FetchedAt { get; set; }
     }
 }

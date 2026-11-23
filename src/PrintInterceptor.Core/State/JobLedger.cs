@@ -62,6 +62,13 @@ public sealed class LedgerEntry
     public string? SourceFile { get; set; }
     public string? OfflineSignature { get; set; }
     public string? OfflineReceiptDate { get; set; }
+
+    /// <summary>
+    /// This document was signed offline. Its original request body is only the pre-offline
+    /// draft: the fiscalised sale is the signed body on the offline queue item. Online
+    /// reconciliation must never replay the draft for one of these jobs.
+    /// </summary>
+    public bool OfflineOrigin { get; set; }
     public DateTimeOffset? SyncedAt { get; set; }
     public int ReprintCount { get; set; }
 
@@ -226,7 +233,8 @@ public sealed class JobLedger
     /// between the claim and the answer, which is the same unknown. The anchor is UpdatedAt, the
     /// claim's own timestamp, so a job being fiscalised right now is never reconciled alongside.
     /// Entries that have spent their budget drop out and become the operator's task, which is
-    /// what a manual pass is for.
+    /// what a manual pass is for. Offline-origin entries are excluded too: only the signed
+    /// request on the offline queue can be replayed for them, never the pre-offline draft.
     /// </summary>
     public IReadOnlyList<LedgerEntry> PendingReconcile(
         int limit,
@@ -237,6 +245,7 @@ public sealed class JobLedger
         lock (_gate)
         {
             return _document.Entries.Values
+                .Where(entry => !entry.OfflineOrigin)
                 .Where(entry => entry.ReconcileAttempts < maxAttempts)
                 .Where(entry => entry.Status == LedgerStatus.AmbiguousFailure ||
                                 (entry.Status == LedgerStatus.InFlight && now - entry.UpdatedAt > inFlightGrace))
@@ -406,7 +415,14 @@ public sealed class JobLedger
             entry.DuplicateAttemptCount++;
             entry.LastDuplicateAttemptAt = DateTimeOffset.Now;
             entry.LastDuplicateAttemptHash = duplicateHash;
-            entry.UpdatedAt = entry.LastDuplicateAttemptAt.Value;
+
+            // UpdatedAt is the in-flight clock: advancing it would make a job that died
+            // between claim and answer look live forever, so it is never touched here.
+            if (entry.Status != LedgerStatus.InFlight)
+            {
+                entry.UpdatedAt = entry.LastDuplicateAttemptAt.Value;
+            }
+
             SaveLocked();
 
             var (headline, closing) = outcome switch
@@ -530,6 +546,7 @@ public sealed class JobLedger
             entry.Currency = signed.Currency;
             entry.OfflineSignature = signed.Signature;
             entry.OfflineReceiptDate = signed.ReceiptDate;
+            entry.OfflineOrigin = true;
             entry.Error = null;
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
@@ -566,7 +583,12 @@ public sealed class JobLedger
         }
     }
 
-    public void MarkFailure(string hash, LedgerStatus status, string error)
+    /// <summary>
+    /// Records a failed outcome. <paramref name="offlineOrigin"/> is sticky: once a document
+    /// has been signed offline it must stay out of online reconciliation, which would otherwise
+    /// re-send the pre-offline body.
+    /// </summary>
+    public void MarkFailure(string hash, LedgerStatus status, string error, bool offlineOrigin = false)
     {
         lock (_gate)
         {
@@ -578,6 +600,7 @@ public sealed class JobLedger
 
             entry.Status = status;
             entry.Error = error;
+            entry.OfflineOrigin = entry.OfflineOrigin || offlineOrigin;
             entry.UpdatedAt = DateTimeOffset.Now;
             SaveLocked();
         }
@@ -744,6 +767,7 @@ public sealed class JobLedger
         SourceFile = entry.SourceFile,
         OfflineSignature = entry.OfflineSignature,
         OfflineReceiptDate = entry.OfflineReceiptDate,
+        OfflineOrigin = entry.OfflineOrigin,
         SyncedAt = entry.SyncedAt,
         ReprintCount = entry.ReprintCount,
         DuplicateAttemptCount = entry.DuplicateAttemptCount,

@@ -60,6 +60,7 @@ public sealed class ParseProfileTests : IDisposable
         Assert.Empty(store.LoadErrors);
         Assert.Contains("sage", profiles.Select(p => p.Name));
         Assert.Contains("zohobooks", profiles.Select(p => p.Name));
+        Assert.Contains("palladium", profiles.Select(p => p.Name));
         Assert.All(profiles, profile => Assert.True(profile.BuiltIn));
     }
 
@@ -92,6 +93,30 @@ public sealed class ParseProfileTests : IDisposable
         Assert.Equal("Order No.", config.ProductStartLine);
         Assert.Equal("Items count", config.ProductEndLine);
         Assert.Equal(new ParseConfig().Patterns.InvoiceRow, config.Patterns.InvoiceRow);
+        Assert.Equal(new ParseConfig().Limits.LineTolerance, config.Limits.LineTolerance);
+    }
+
+    [Fact]
+    public void ThePalladiumProfileDescribesThePalladiumLayout()
+    {
+        var profile = ShippedStore().Find("palladium")!;
+        var config = new ParseConfig();
+
+        profile.Rules.ApplyTo(config);
+
+        Assert.Equal("Number", config.InvoiceNumber);
+        Assert.Equal("Customer Name", config.CustomerName);
+        Assert.Equal("Customer VAT", config.CustomerVATNumber);
+        Assert.Equal(ParseConfig.TaxTypeStandard, config.DefaultTaxType);
+        Assert.Equal(0.155, config.VatRate);
+        Assert.True(config.VatInclusive);
+        Assert.Equal("1", config.VatFlag);
+        Assert.Contains("MM/dd/yyyy", config.DateFormats);
+        Assert.Contains("TOTALINC", config.ItemTableHeaderAnyOf);
+        Assert.Contains("Reference", config.Corrections.OriginalInvoiceLabels);
+        Assert.Contains("qty", config.Patterns.InvoiceRow);
+        Assert.Contains("vatAmount", config.Patterns.InvoiceRow);
+        Assert.DoesNotContain("disc", config.Patterns.InvoiceRow);
         Assert.Equal(new ParseConfig().Limits.LineTolerance, config.Limits.LineTolerance);
     }
 
@@ -202,6 +227,87 @@ public sealed class ParseProfileTests : IDisposable
     }
 
     [Fact]
+    public void AnInvoiceRowMayStateVatAsAPercentageOrAsMoney()
+    {
+        var store = Store();
+
+        // The built-in row keeps the disc + vat percentage columns.
+        Assert.Empty(store.Validate(Profile("percent")));
+
+        var amount = Profile("amount");
+        amount.Rules.Patterns = new ParseProfilePatterns
+        {
+            InvoiceRow = @"^(?<name>.*?)\s+(?<qty>\d+)\s+(?<price>[\d.]+)\s+(?<vatAmount>[\d.]+)\s+(?<exclusive>[\d.]+)$"
+        };
+        Assert.Empty(store.Validate(amount));
+
+        var neither = Profile("neither");
+        neither.Rules.Patterns = new ParseProfilePatterns { InvoiceRow = @"^(?<name>.*)$" };
+        Assert.Contains(store.Validate(neither), error => error.Contains("invoiceRow") && error.Contains("qty"));
+    }
+
+    [Fact]
+    public void AProfileCanSetTheStandardVatRate()
+    {
+        var profile = Profile("rate");
+        profile.Rules.VatRate = 0.16;
+        profile.Rules.DefaultTaxType = ParseConfig.TaxTypeStandard;
+
+        Assert.Empty(Store().Validate(profile));
+
+        var config = new ParseConfig();
+        profile.Rules.ApplyTo(config);
+
+        Assert.Equal(0.16, config.VatRate);
+        Assert.Equal(ParseConfig.TaxTypeStandard, config.DefaultTaxType);
+    }
+
+    [Fact]
+    public void AProfileCanSetWhetherPricesIncludeVat()
+    {
+        var profile = Profile("pricing");
+        profile.Rules.VatInclusive = false;
+
+        Assert.Empty(Store().Validate(profile));
+
+        var config = new ParseConfig { VatFlag = "1" };
+        profile.Rules.ApplyTo(config);
+
+        Assert.False(config.VatInclusive);
+        Assert.Equal("0", config.VatFlag);
+
+        profile.Rules.VatInclusive = true;
+        profile.Rules.ApplyTo(config);
+        Assert.True(config.VatInclusive);
+        Assert.Equal("1", config.VatFlag);
+    }
+
+    [Fact]
+    public void AnOutOfRangeVatRateInAProfileIsRejected()
+    {
+        foreach (var rate in new[] { -0.1, 1.5 })
+        {
+            var profile = Profile("rate");
+            profile.Rules.VatRate = rate;
+
+            var errors = Store().Validate(profile);
+
+            Assert.Contains(errors, error => error.Contains("vatRate"));
+        }
+    }
+
+    [Fact]
+    public void CapturingAProfileKeepsTheTillsVatRateAndPricingBasis()
+    {
+        var parse = new ParseConfig { VatRate = 0.16, VatFlag = "0" };
+
+        var profile = ParseProfileStore.Capture("kiosk", "Kiosk layout", parse);
+
+        Assert.Equal(0.16, profile.Rules.VatRate);
+        Assert.False(profile.Rules.VatInclusive);
+    }
+
+    [Fact]
     public void AProfileNameThatCouldEscapeTheProfilesFolderIsRejected()
     {
         var errors = Store().Validate(new ParseProfile
@@ -305,10 +411,10 @@ public sealed class ParseProfileTests : IDisposable
     }
 
     [Fact]
-    public void ProfileFieldsCannotReachTheNumbersAReceiptIsFiscalisedWith()
+    public void ProfileFieldsCannotChangeCurrencyOrPaymentSettings()
     {
         var rules = typeof(ParseProfileRules).GetProperties().Select(p => p.Name);
-        var fiscalFields = new[] { "VatRate", "VatFlag", "Currencies", "Currency", "PaymentMethod", "TaxSymbol", "NonTaxSymbol" };
+        var fiscalFields = new[] { "VatFlag", "Currencies", "Currency", "PaymentMethod", "TaxSymbol", "NonTaxSymbol" };
 
         foreach (var field in fiscalFields)
         {

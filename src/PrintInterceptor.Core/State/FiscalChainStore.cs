@@ -62,14 +62,17 @@ public sealed class FiscalChainStore
     }
 
     /// <summary>
-    /// Atomically signs the next receipt and advances the chain. The callback
-    /// runs while the store is locked so counters cannot be claimed twice.
+    /// Atomically signs the next receipt and advances the chain. The signer runs
+    /// while the store is locked so counters cannot be claimed twice. An optional
+    /// beforeCommit callback can durably protect the signed receipt before the
+    /// counter is spent; if it fails, the chain is left untouched.
     /// </summary>
     public bool TrySignNext(
         string deviceId,
         Func<FiscalChainSnapshot, OfflineSignedReceipt> signer,
         out OfflineSignedReceipt signed,
-        out string error)
+        out string error,
+        Func<OfflineSignedReceipt, (bool Ok, string Error)>? beforeCommit = null)
     {
         lock (_gate)
         {
@@ -88,6 +91,29 @@ public sealed class FiscalChainStore
             {
                 error = ex.Message;
                 return false;
+            }
+
+            if (beforeCommit is not null)
+            {
+                bool protectedOk;
+                string protectError;
+                try
+                {
+                    (protectedOk, protectError) = beforeCommit(receipt);
+                }
+                catch (Exception ex)
+                {
+                    protectedOk = false;
+                    protectError = ex.Message;
+                }
+
+                if (!protectedOk)
+                {
+                    error = string.IsNullOrWhiteSpace(protectError)
+                        ? "The signed receipt could not be protected before its counter was committed."
+                        : protectError;
+                    return false;
+                }
             }
 
             var next = new FiscalChainSnapshot
@@ -147,21 +173,51 @@ public sealed class FiscalChainStore
                 return;
             }
 
-            if (current is not null && globalNo is not null && globalNo < current.ReceiptGlobalNo)
+            if (current is not null && globalNo is not null && globalNo <= current.ReceiptGlobalNo)
             {
                 _log.Warn(
-                    $"Online receipt global {globalNo} is behind the offline chain ({current.ReceiptGlobalNo}); " +
+                    $"Online receipt global {globalNo} is not ahead of the chain ({current.ReceiptGlobalNo}); " +
+                    "ignoring a stale or repeated response rather than rewinding the hash.");
+                return;
+            }
+
+            if (current is not null && day is not null && day < current.FiscalDayNo)
+            {
+                _log.Warn(
+                    $"Online receipt fiscal day {day} is behind the chain ({current.FiscalDayNo}); " +
                     "keeping the newer chain.");
                 return;
+            }
+
+            // A new fiscal day legitimately restarts the daily counter, so a lower counter is
+            // only a rewind when it belongs to the day the chain already holds.
+            var effectiveCounter = counter ?? current?.ReceiptCounter ?? 0;
+            if (current is not null && counter is not null &&
+                (day is null || day == current.FiscalDayNo) &&
+                counter < current.ReceiptCounter)
+            {
+                _log.Warn(
+                    $"Online receipt counter {counter} is behind the chain ({current.ReceiptCounter}); " +
+                    "keeping the newer counter.");
+                effectiveCounter = current.ReceiptCounter;
+            }
+
+            // The hash only moves with a new global number. A response with no (or an older)
+            // global number must not replace the latest hash with one from an earlier receipt.
+            var advancesGlobal = globalNo is not null && globalNo > (current?.ReceiptGlobalNo ?? 0);
+            var effectiveHash = string.IsNullOrWhiteSpace(hash) ? current?.LastHash ?? "" : hash;
+            if (!advancesGlobal && !string.IsNullOrWhiteSpace(current?.LastHash))
+            {
+                effectiveHash = current!.LastHash;
             }
 
             var next = new FiscalChainSnapshot
             {
                 DeviceId = deviceId,
                 FiscalDayNo = day ?? current?.FiscalDayNo ?? 0,
-                ReceiptCounter = counter ?? current?.ReceiptCounter ?? 0,
+                ReceiptCounter = effectiveCounter,
                 ReceiptGlobalNo = globalNo ?? current?.ReceiptGlobalNo ?? 0,
-                LastHash = string.IsNullOrWhiteSpace(hash) ? current?.LastHash ?? "" : hash,
+                LastHash = effectiveHash,
                 UpdatedAt = DateTimeOffset.Now
             };
 

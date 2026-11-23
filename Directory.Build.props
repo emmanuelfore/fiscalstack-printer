@@ -1,0 +1,23 @@
+<Project>
+
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <!-- Source Link / deterministic paths are only wanted on the CI agent. -->
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+
+    <!-- Every project already opted in; this keeps one baseline if a project is added. -->
+    <Nullable>enable</Nullable>
+
+    <!--
+      Kept explicitly false for now. This codebase has pre-existing CAxxxx diagnostics
+      (catch-all handlers, IDisposable patterns, culture-sensitive formatting) that would
+      fail the build the moment warnings are errors. Analysts still see them in the log;
+      flip this to true once that backlog is cleared.
+    -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

@@ -86,6 +86,170 @@ public class OfflineSyncEngineTests
         }
     }
 
+    [Fact]
+    public async Task AnAmbiguousAnswerPausesTheQueueAndTheNextSyncShortCircuits()
+    {
+        var directory = TempDirectory();
+        var posts = 0;
+        await using var server = new StubServer(path =>
+        {
+            if (path.EndsWith("/fiscalize", StringComparison.Ordinal))
+            {
+                posts++;
+                return (500, "{\"message\":\"gateway timeout\"}");
+            }
+
+            return (200, "{}");
+        });
+
+        try
+        {
+            var log = NullLog.Instance;
+            using var client = Client(server.Port, log);
+            var queue = new OfflineQueue(directory, log);
+            Assert.True(queue.TryEnqueue(Item("cccc"), out _));
+
+            var engine = Engine(client, queue, directory, log);
+            var first = await engine.SyncNowAsync(CancellationToken.None);
+
+            Assert.True(first.Paused);
+            Assert.Equal(0, first.Synced);
+            Assert.Equal(1, posts);
+            Assert.Equal("cccc", queue.CurrentPause!.JobHash);
+            Assert.True(queue.HasPending); // the ambiguous receipt stays for the operator
+
+            var entry = new JobLedger(directory, log).Get("cccc")!;
+            Assert.Equal(LedgerStatus.AmbiguousFailure, entry.Status);
+            Assert.True(entry.OfflineOrigin);
+
+            // The log used to say "paused" without writing a marker. A second pass must now
+            // short-circuit instead of trying the next counter in the chain.
+            var second = await engine.SyncNowAsync(CancellationToken.None);
+            Assert.True(second.Paused);
+            Assert.Equal(1, posts);
+            Assert.True(queue.HasPending);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task OnlyTheSignedRequestBodyIsSyncedAndAPauseBlocksAdoption()
+    {
+        var directory = TempDirectory();
+        var posts = 0;
+        await using var server = new StubServer(path =>
+        {
+            if (path.EndsWith("/fiscalize", StringComparison.Ordinal))
+            {
+                posts++;
+                return (200, """
+                    {"success":true,"fiscalCode":"FC-SIGNED","receiptNumber":9,
+                     "receipt":{"invoiceNo":"INV-SIGNED","receiptGlobalNo":9,"receiptCounter":4,
+                                "fiscalDayNo":3,"receiptTotal":5.00}}
+                    """);
+            }
+
+            return (200, "{}");
+        });
+
+        try
+        {
+            var log = NullLog.Instance;
+            using var client = Client(server.Port, log);
+            var queue = new OfflineQueue(directory, log);
+            var item = Item("dddd");
+            item.Request = new FiscalizeRequest
+            {
+                InvoiceNumber = "INV-SIGNED",
+                Currency = "USD",
+                OfflineSignature = "SIGNED-BODY",
+                OfflineReceiptCounter = 4,
+                OfflineGlobalReceiptCounter = 9,
+                OfflinePreviousHash = "PREVIOUS"
+            };
+            item.ReceiptTotal = 5m;
+            Assert.True(queue.TryEnqueue(item, out _));
+
+            var engine = Engine(client, queue, directory, log);
+            var outcome = await engine.SyncNowAsync(CancellationToken.None);
+
+            Assert.Equal(1, outcome.Synced);
+            Assert.Equal(1, posts);
+            Assert.Contains("SIGNED-BODY", server.LastBody ?? "");
+            Assert.DoesNotContain("PRE-OFFLINE", server.LastBody ?? "");
+            Assert.Equal(LedgerStatus.Fiscalised, new JobLedger(directory, log).Get("dddd")!.Status);
+
+            // A later receipt cannot be adopted while an earlier one is held for review.
+            var next = Item("eeee");
+            next.Request.InvoiceNumber = "INV-NEXT";
+            Assert.True(queue.TryEnqueue(next, out _));
+            queue.Pause(next, "the previous receipt needs operator review");
+
+            var paused = await engine.SyncNowAsync(CancellationToken.None);
+
+            Assert.True(paused.Paused);
+            Assert.Equal(1, posts);
+            Assert.Equal(1, queue.Count);
+            Assert.Null(new JobLedger(directory, log).Get("eeee"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ADuplicateSignedReceiptIsAdoptedUsingTheQueuedRequest()
+    {
+        var directory = TempDirectory();
+        await using var server = new StubServer(path =>
+        {
+            if (path.EndsWith("/fiscalize", StringComparison.Ordinal))
+            {
+                return (409, "{\"error\":\"DUPLICATE_INVOICE\"}");
+            }
+
+            if (path.Contains("/invoices", StringComparison.Ordinal))
+            {
+                return (200, """
+                    {"data":[{"id":12,"invoiceNumber":"INV-SIGNED","status":"FISCALISED",
+                      "currency":"USD","total":5.00,"fiscalCode":"FC-DUP","receiptGlobalNo":9,
+                      "receiptCounter":4,"fiscalDayNo":3}],"pages":1,"page":1}
+                    """);
+            }
+
+            return (200, "{}");
+        });
+
+        try
+        {
+            var log = NullLog.Instance;
+            using var client = Client(server.Port, log);
+            var queue = new OfflineQueue(directory, log);
+            var item = Item("ffff");
+            item.Request.InvoiceNumber = "INV-SIGNED"; // the number on the signed request
+            item.ReceiptTotal = 5m;
+            Assert.True(queue.TryEnqueue(item, out _));
+
+            var engine = Engine(client, queue, directory, log);
+            var outcome = await engine.SyncNowAsync(CancellationToken.None);
+
+            Assert.False(outcome.Paused);
+            Assert.Equal(1, outcome.Synced);
+            Assert.False(queue.HasPending);
+            var entry = new JobLedger(directory, log).Get("ffff")!;
+            Assert.Equal(LedgerStatus.Fiscalised, entry.Status);
+            Assert.Equal("FC-DUP", entry.FiscalCode);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static FiscalStackClient Client(int port, ILog log) =>
         new(
             new InterceptorConfig
@@ -141,6 +305,8 @@ public class OfflineSyncEngineTests
 
         public int Port { get; }
 
+        public string? LastBody { get; private set; }
+
         private async Task AcceptLoopAsync()
         {
             while (!_cts.IsCancellationRequested)
@@ -180,14 +346,15 @@ public class OfflineSyncEngineTests
                         }
                     }
 
+                    var body = "";
                     if (headers.TryGetValue("Content-Length", out var lengthText) &&
                         int.TryParse(lengthText, out var length) && length > 0)
                     {
-                        var body = new char[length];
+                        var buffer = new char[length];
                         var read = 0;
                         while (read < length)
                         {
-                            var chunk = await reader.ReadAsync(body.AsMemory(read, length - read));
+                            var chunk = await reader.ReadAsync(buffer.AsMemory(read, length - read));
                             if (chunk == 0)
                             {
                                 break;
@@ -195,8 +362,11 @@ public class OfflineSyncEngineTests
 
                             read += chunk;
                         }
+
+                        body = new string(buffer, 0, read);
                     }
 
+                    LastBody = body;
                     var path = requestLine.Split(' ').ElementAtOrDefault(1) ?? "/";
                     var (status, responseBody) = _respond(path);
                     var bytes = Encoding.UTF8.GetBytes(responseBody);

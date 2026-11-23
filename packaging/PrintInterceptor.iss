@@ -32,13 +32,31 @@ PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
 CloseApplications=yes
 RestartApplications=no
+; build-release.ps1 defines SignToolConfigured and supplies the /Ssigntool
+; definition only when it has a signing certificate. Without this directive
+; Inno Setup would leave the setup and uninstaller unsigned.
+#ifdef SignToolConfigured
+SignTool=signtool
+#endif
 
 [Tasks]
 Name: "printer"; Description: "Install the FiscalStack virtual printer (TCP 127.0.0.1:{#RunPort})"; GroupDescription: "POS integration:"; Flags: checkedonce
+#ifdef GhostscriptBundled
+; No Flags: Inno tasks are checked by default, and checkedonce would silently
+; drop Ghostscript on an upgrade because the previous version is already present.
+Name: "ghostscript"; Description: "Install bundled 64-bit Ghostscript for PDF/PostScript capture and original-invoice stamping (AGPL-3.0)"; GroupDescription: "Optional components:"
+#endif
 Name: "traymode"; Description: "Start as a tray app at sign-in instead of a Windows service"; GroupDescription: "Run mode:"
 
 [Files]
-Source: "..\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The Ghostscript bundle is a separate task so an operator can see and decline
+; its AGPL-3.0 obligations; the rest of the application is always installed.
+; Excludes matches file paths, not directories: \ghostscript\* is required to
+; keep every bundled file out of the always-installed entry.
+Source: "..\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "\ghostscript\*"
+#ifdef GhostscriptBundled
+Source: "..\publish\ghostscript\*"; DestDir: "{app}\ghostscript"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: ghostscript
+#endif
 
 [Icons]
 Name: "{group}\PrintInterceptor tray"; Filename: "{app}\{#AppExeName}"; Parameters: "--tray"; Tasks: traymode
@@ -62,7 +80,10 @@ function GetInstallArguments(Param: String): String;
 var
   Args: String;
 begin
-  Args := '-ExePath ""' + ExpandConstant('{app}\{#AppExeName}') + '"" -Port {#RunPort}';
+  // Pascal single-quoted strings do not double embedded quotes: '""' would put
+  // two literal quotes into CreateProcess's command line, and PowerShell would
+  // then read only "C:\Program" as -ExePath. '"' is one quote character.
+  Args := '-ExePath "' + ExpandConstant('{app}\{#AppExeName}') + '" -Port {#RunPort}';
 
   if WizardIsTaskSelected('traymode') then
     Args := Args + ' -RunMode Tray'
@@ -71,6 +92,11 @@ begin
 
   if not WizardIsTaskSelected('printer') then
     Args := Args + ' -SkipPrinter';
+
+#ifdef GhostscriptBundled
+  if WizardIsTaskSelected('ghostscript') then
+    Args := Args + ' -GhostscriptPath "' + ExpandConstant('{app}\ghostscript\bin\gswin64c.exe') + '"';
+#endif
 
   Result := Args;
 end;

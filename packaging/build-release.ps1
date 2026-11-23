@@ -4,12 +4,19 @@
 # Run on a Windows build agent. Nothing here can run on the Linux dev host, so
 # the signing and installer steps are verified on Windows before shipping.
 #
+# Signing: prefer -Thumbprint with a certificate already in the Windows user or
+# machine store (including an HSM CSP/KSP). A PFX is imported into the current
+# user store first with its password as a SecureString; no password is ever
+# converted to plain text or placed on a signtool / ISCC command line.
+#
 # Examples:
 #   .\packaging\build-release.ps1 -Version 1.2.0
-#   .\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx
 #   .\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123456789ABCDEF...
+#   .\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx
 #   .\packaging\build-release.ps1 -Version 1.2.0 -GhostscriptDir "C:\Program Files\gs\gs10.08.0"
 #   .\packaging\build-release.ps1 -Version 1.2.0 -NoGhostscript
+#   .\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123... `
+#       -Channel stable -UpdateBaseUrl https://updates.example.com/printinterceptor
 
 [CmdletBinding()]
 param(
@@ -20,16 +27,39 @@ param(
     [string]$PfxPath = "",
     [SecureString]$PfxPassword,
     [string]$Thumbprint = "",
-    [string]$TimestampUrl = "http://timestamp.digicert.com",
+    [string]$TimestampUrl = "https://timestamp.digicert.com",
     [switch]$SkipInstaller,
     [string]$InnoCompiler = "",
     [string]$GhostscriptDir = "",
     [switch]$NoGhostscript,
     [switch]$StripGhostscriptFonts,
-    [string]$SourceOfferContact = ""
+    [string]$SourceOfferContact = "",
+    [string]$Channel = "stable",
+    [string]$UpdateBaseUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Tracks a certificate imported from a PFX for this build only. Thumbprint
+# signing never needs a password on a command line, and the temporary import is
+# removed even when a later step fails.
+$importedSigningThumbprint = $null
+
+function Remove-ImportedSigningCertificate {
+    if ([string]::IsNullOrWhiteSpace($importedSigningThumbprint)) { return }
+    try {
+        $path = "Cert:\CurrentUser\My\$importedSigningThumbprint"
+        if (Test-Path $path) {
+            Remove-Item -Path $path -ErrorAction Stop
+            Write-Host "Removed the temporary signing certificate from Cert:\CurrentUser\My."
+        }
+    }
+    catch {
+        Write-Warning "Could not remove the temporary signing certificate from Cert:\CurrentUser\My: $($_.Exception.Message)"
+    }
+}
+
+trap { Remove-ImportedSigningCertificate; throw }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
@@ -72,6 +102,15 @@ foreach ($script in @(
     (Join-Path $PSScriptRoot "install.ps1")
 )) {
     Copy-Item -Path $script -Destination $publishDir -Force
+}
+
+# The updater lives in its own folder so the setup package ships it at
+# {app}\updater. It is installed as a SYSTEM scheduled task separately; a
+# release must not silently change a till's update policy.
+$updaterStage = Join-Path $publishDir "updater"
+if (-not (Test-Path $updaterStage)) { New-Item -ItemType Directory -Path $updaterStage -Force | Out-Null }
+foreach ($script in @("auto-update.ps1", "install-update-task.ps1", "rollback.ps1")) {
+    Copy-Item -Path (Join-Path $PSScriptRoot $script) -Destination (Join-Path $updaterStage $script) -Force
 }
 
 # Ghostscript is needed when the till captures PostScript or PDF jobs, so a
@@ -167,10 +206,16 @@ else {
         }
     }
 
-    # Ship the licence text that covers the redistributed binaries.
-    $licenceFiles = Get-ChildItem -Path $gsSource -File |
-        Where-Object { $_.Name -match "^(license|copying|agpl|gpl|notice)" }
-    if (-not $licenceFiles) {
+    # Ship the licence text that covers the redistributed binaries. Official
+    # Ghostscript installs keep the AGPL text in doc\COPYING rather than beside
+    # the executables, so look there too before warning the release manager.
+    $licenceFiles = @(Get-ChildItem -Path $gsSource -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "^(license|copying|agpl|gpl|notice)" })
+    if ($licenceFiles.Count -eq 0) {
+        $licenceFiles = @(Get-ChildItem -Path (Join-Path $gsSource "doc") -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "^(license|copying|agpl|gpl|notice)" })
+    }
+    if ($licenceFiles.Count -eq 0) {
         Write-Warning "No licence file beside the Ghostscript binaries in $gsSource. SOURCE-OFFER.txt says so; add the AGPL text to the package before shipping it."
     }
     else {
@@ -263,9 +308,8 @@ function Resolve-SignTool {
 }
 
 $signTool = $null
-$pfxFilePath = $null
-$pfxPasswordPlain = $null
-if (-not [string]::IsNullOrWhiteSpace($PfxPath) -or -not [string]::IsNullOrWhiteSpace($Thumbprint)) {
+$signingThumbprint = $Thumbprint.Trim()
+if (-not [string]::IsNullOrWhiteSpace($PfxPath) -or -not [string]::IsNullOrWhiteSpace($signingThumbprint)) {
     $signTool = Resolve-SignTool
     if (-not $signTool) {
         throw "Signing was requested but signtool.exe was not found. Install the Windows SDK or add signtool to PATH."
@@ -273,30 +317,46 @@ if (-not [string]::IsNullOrWhiteSpace($PfxPath) -or -not [string]::IsNullOrWhite
 }
 
 if (-not [string]::IsNullOrWhiteSpace($PfxPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($signingThumbprint)) {
+        throw "Pass either -PfxPath or -Thumbprint, not both."
+    }
+
+    # Import with the password still a SecureString, then sign by thumbprint.
+    # signtool and ISCC only ever see a /sha1 value, never /p or /f.
+    $existingThumbprints = @(Get-ChildItem "Cert:\CurrentUser\My" -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Thumbprint })
     $pfxFilePath = (Resolve-Path $PfxPath).Path
-    if ($null -ne $PfxPassword) {
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($PfxPassword)
-        try {
-            $pfxPasswordPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-        }
-        finally {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
+    $importArgs = @{ FilePath = $pfxFilePath; CertStoreLocation = "Cert:\CurrentUser\My" }
+    if ($null -ne $PfxPassword) { $importArgs["Password"] = $PfxPassword }
+
+    $imported = Import-PfxCertificate @importArgs -ErrorAction Stop
+    $signingThumbprint = $imported.Thumbprint
+    if ($existingThumbprints -notcontains $signingThumbprint) {
+        $importedSigningThumbprint = $signingThumbprint
+    }
+    Write-Host "Imported the signing certificate into Cert:\CurrentUser\My ($signingThumbprint) for this build. The PFX password was not placed on a command line."
+}
+
+if ($signTool) {
+    if ([string]::IsNullOrWhiteSpace($signingThumbprint)) {
+        throw "Signing was requested without a certificate. Pass -Thumbprint or -PfxPath."
+    }
+    $cert = Get-Item "Cert:\CurrentUser\My\$signingThumbprint" -ErrorAction SilentlyContinue
+    if (-not $cert) { $cert = Get-Item "Cert:\LocalMachine\My\$signingThumbprint" -ErrorAction SilentlyContinue }
+    if (-not $cert) {
+        throw "No certificate with thumbprint $signingThumbprint was found in the CurrentUser or LocalMachine My store."
     }
 }
 
 function Get-SignArguments {
-    $arguments = @("sign", "/fd", "SHA256", "/td", "SHA256", "/tr", $TimestampUrl)
-    if (-not [string]::IsNullOrWhiteSpace($Thumbprint)) {
-        $arguments += @("/sha1", $Thumbprint)
+    $arguments = @("sign", "/fd", "SHA256")
+    # An empty -TimestampUrl is used by the integration verifier so a temporary
+    # self-signed certificate does not need network access. Production builds
+    # keep the default RFC3161 timestamp.
+    if (-not [string]::IsNullOrWhiteSpace($TimestampUrl)) {
+        $arguments += @("/td", "SHA256", "/tr", $TimestampUrl)
     }
-    else {
-        $arguments += @("/f", $pfxFilePath)
-        if ($pfxPasswordPlain) {
-            $arguments += @("/p", $pfxPasswordPlain)
-        }
-    }
-
+    $arguments += @("/sha1", $signingThumbprint)
     return $arguments
 }
 
@@ -335,27 +395,32 @@ if (-not $SkipInstaller) {
     else {
         $iss = Join-Path $PSScriptRoot "PrintInterceptor.iss"
 
-        # ISCC is a Delphi program: an argument is one quoted parameter and ""
-        # inside it is a literal quote. Build the whole command line as a string
-        # and let Start-Process pass it through untouched (PowerShell 5.1 mangles
-        # embedded quotes when splatting an array to a native program).
+        # ISCC is a Delphi program: build the whole command line as a string and
+        # let Start-Process pass it through untouched (PowerShell 5.1 mangles
+        # embedded quotes when splatting an array to a native program). Inside
+        # /Ssigntool, Inno's own $q constant supplies a literal quote.
         $isccArguments = "/DAppVersion=$Version /O`"$OutputRoot`""
 
-        # The installer signs itself and the uninstaller with this command.
+        # Only expose the Ghostscript component when this build actually bundled
+        # it; otherwise ISCC would compile a Files entry with no matching source.
+        if (Test-Path (Join-Path $publishDir "ghostscript\bin\gswin64c.exe")) {
+            $isccArguments += " /DGhostscriptBundled=1"
+        }
+
+        # The installer signs itself and the uninstaller through Inno's SignTool
+        # directive. Thumbprint only: no PFX path, no password on any command line.
         if ($signTool) {
-            $innoSign = "`"$signTool`" sign /fd SHA256 /td SHA256 /tr `"$TimestampUrl`""
+            $isccArguments += " /DSignToolConfigured=1"
 
-            if (-not [string]::IsNullOrWhiteSpace($Thumbprint)) {
-                $innoSign += " /sha1 $Thumbprint"
+            # Inno uses $q (not "") for a quote inside a /S command, and $f for
+            # the file being signed. Both must survive PowerShell interpolation.
+            $innoSign = '$q' + $signTool + '$q sign /fd SHA256'
+            if (-not [string]::IsNullOrWhiteSpace($TimestampUrl)) {
+                $innoSign += ' /td SHA256 /tr $q' + $TimestampUrl + '$q'
             }
-            else {
-                $innoSign += " /f `"$pfxFilePath`""
-                if ($pfxPasswordPlain) {
-                    $innoSign += " /p `"$pfxPasswordPlain`""
-                }
-            }
+            $innoSign += ' /sha1 ' + $signingThumbprint
 
-            $isccArguments += " `"/Ssigntool=$($innoSign -replace '"', '""') `$f`""
+            $isccArguments += " `"/Ssigntool=$innoSign `$f`""
         }
 
         $isccArguments += " `"$iss`""
@@ -371,10 +436,49 @@ if (-not $SkipInstaller) {
     }
 }
 
+# Update manifest. The setup file may be hosted under a different public name,
+# so -UpdateBaseUrl sets the prefix; a relative setupUrl is resolved against the
+# manifest URL by the updater. The signer thumbprint is only present for signed
+# builds, and auto-update.ps1 always pins its own expected thumbprint anyway.
+$setupPath = Join-Path $OutputRoot "$setupName.exe"
+if (-not $SkipInstaller -and (Test-Path $setupPath)) {
+    if ([string]::IsNullOrWhiteSpace($UpdateBaseUrl)) {
+        $setupUrl = "$setupName.exe"
+    }
+    else {
+        $setupUrl = $UpdateBaseUrl.TrimEnd('/') + "/" + $setupName + ".exe"
+    }
+
+    $setupHash = (Get-FileHash -Path $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifestThumbprint = ""
+    if ($signTool) {
+        $manifestThumbprint = ($signingThumbprint -replace '[^A-Fa-f0-9]', '').ToUpperInvariant()
+    }
+    $ghostscriptBundled = Test-Path (Join-Path $publishDir "ghostscript\bin\gswin64c.exe")
+    $installTasks = if ($ghostscriptBundled) { "printer,ghostscript" } else { "printer" }
+
+    $manifest = [ordered]@{
+        version          = $Version
+        channel          = $Channel
+        setupUrl         = $setupUrl
+        sha256           = $setupHash
+        signerThumbprint = $manifestThumbprint
+        publishedAt      = (Get-Date).ToUniversalTime().ToString("o")
+        installTasks     = $installTasks
+    }
+
+    $manifestPath = Join-Path $OutputRoot "update.json"
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $manifestPath -Encoding UTF8
+    Copy-Item -Path $manifestPath -Destination (Join-Path $OutputRoot "update-$Version.json") -Force
+    Write-Host "Update manifest: $manifestPath"
+}
+
+Remove-ImportedSigningCertificate
+
 Write-Host ""
 Write-Host "Release $Version complete:"
 Write-Host "  Publish : $publishDir"
 Write-Host "  Zip     : $zipPath"
-if (Test-Path (Join-Path $OutputRoot "$setupName.exe")) {
-    Write-Host "  Setup   : $(Join-Path $OutputRoot "$setupName.exe")"
+if (-not $SkipInstaller -and (Test-Path $setupPath)) {
+    Write-Host "  Setup   : $setupPath"
 }

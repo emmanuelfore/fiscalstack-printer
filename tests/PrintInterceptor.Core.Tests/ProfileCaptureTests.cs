@@ -156,7 +156,7 @@ public class ProfileCaptureTests : IDisposable
         var json = JsonSerializer.Serialize(capture.Rules, ProfileJson);
         foreach (var forbidden in new[]
                  {
-                     "vatRate", "vatFlag", "currency", "currencies", "paymentMethod", "taxSymbol", "nonTaxSymbol"
+                     "vatFlag", "currency", "currencies", "paymentMethod", "taxSymbol", "nonTaxSymbol"
                  })
         {
             Assert.DoesNotContain($"\"{forbidden}\"", json);

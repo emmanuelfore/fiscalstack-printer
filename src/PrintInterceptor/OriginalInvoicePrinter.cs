@@ -138,18 +138,19 @@ public sealed class OriginalInvoicePrinter
         }
 
         var token = Guid.NewGuid().ToString("N");
-        var raster = _rasterizer
-            .RasterizeAsync(bytes, extension, token, RasterDpi, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
-
-        if (!raster.Success || raster.PageFiles.Count == 0)
-        {
-            throw new InvalidOperationException($"The original invoice could not be rendered: {raster.Error}");
-        }
-
+        RasterResult raster;
         try
         {
+            raster = _rasterizer
+                .RasterizeAsync(bytes, extension, token, RasterDpi, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            if (!raster.Success || raster.PageFiles.Count == 0)
+            {
+                throw new InvalidOperationException($"The original invoice could not be rendered: {raster.Error}");
+            }
+
             var document = new PrintDocument
             {
                 DocumentName = $"Fiscal invoice {model.InvoiceNumber}",

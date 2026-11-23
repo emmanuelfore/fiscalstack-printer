@@ -20,6 +20,12 @@ public sealed record OfflineSyncOutcome(
 /// </summary>
 public sealed class OfflineSyncEngine
 {
+    /// <summary>Pages read when a signed request was refused as a duplicate and its proof must be fetched.</summary>
+    private const int DuplicateLookupPages = 10;
+
+    /// <summary>Same tolerance as online reconciliation: rounding between the till and ZIMRA is not a different sale.</summary>
+    private const decimal DuplicateTotalTolerance = 0.05m;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly FiscalStackClient _client;
     private readonly OfflineReceiptService _offline;
@@ -80,6 +86,10 @@ public sealed class OfflineSyncEngine
             return new OfflineSyncOutcome(0, _queue.Count, false, pause.Reason, Paused: true);
         }
 
+        // A receipt that was signed but could not be queued owns the next counter. Put it back
+        // before looking at what is pending so it cannot be skipped by a later receipt.
+        _queue.RecoverPending();
+
         if (!_queue.HasPending)
         {
             return new OfflineSyncOutcome(0, 0, true, null);
@@ -127,11 +137,45 @@ public sealed class OfflineSyncEngine
                     continue;
                 }
 
+                if (outcome.HttpStatus == 409)
+                {
+                    // The signed request landed after the last list read. Look the invoice up by
+                    // the number on that signed request — never by the pre-offline body in the
+                    // job archive — and adopt the server's proof rather than calling a receipt
+                    // that exists a rejection.
+                    var invoiceNumber = item.Request.InvoiceNumber;
+                    var lookup = string.IsNullOrWhiteSpace(invoiceNumber)
+                        ? null
+                        : await _client.FindInvoiceAsync(invoiceNumber!, DuplicateLookupPages, cancellationToken);
+                    var invoice = lookup is { Status: InvoiceLookupStatus.Found } ? lookup.Invoice : null;
+
+                    if (invoice is not null &&
+                        (invoice.Total is null ||
+                         Math.Abs(Math.Abs(invoice.Total.Value) - Math.Abs(item.ReceiptTotal)) <= DuplicateTotalTolerance))
+                    {
+                        var proof = invoice.ToResponse();
+                        _ledger.MarkSynced(item.JobHash, proof);
+                        _offline.RecordOnlineSuccess(proof);
+                        _queue.Remove(item);
+                        synced++;
+                        _log.Info($"Offline receipt {label} was already on the server; its proof was adopted.");
+                        continue;
+                    }
+
+                    // A duplicate that cannot be read back is still an unknown outcome, not a
+                    // rejection: the receipt exists somewhere at ZIMRA.
+                    var duplicateError = outcome.Error ?? "The signed request was a duplicate but its proof could not be read back.";
+                    _queue.RecordAttempt(item, duplicateError);
+                    _ledger.MarkFailure(item.JobHash, LedgerStatus.AmbiguousFailure, duplicateError, offlineOrigin: true);
+                    _queue.Pause(item, duplicateError);
+                    return new OfflineSyncOutcome(synced, _queue.Count, true, duplicateError, Paused: true);
+                }
+
                 if (outcome.Status == FiscalizeOutcomeStatus.Rejected)
                 {
                     var error = outcome.Error ?? "The server rejected the offline receipt.";
                     _queue.Pause(item, error);
-                    _ledger.MarkFailure(item.JobHash, LedgerStatus.Rejected, error);
+                    _ledger.MarkFailure(item.JobHash, LedgerStatus.Rejected, error, offlineOrigin: true);
                     _queue.MoveToFailed(item, error);
                     _log.Error(
                         $"Offline receipt {label} was REJECTED: {error}. The queue is PAUSED; " +
@@ -141,11 +185,16 @@ public sealed class OfflineSyncEngine
 
                 var ambiguous = outcome.Error ?? "The sync outcome is unknown.";
                 _queue.RecordAttempt(item, ambiguous);
-                _ledger.MarkFailure(item.JobHash, LedgerStatus.AmbiguousFailure, ambiguous);
+                _ledger.MarkFailure(item.JobHash, LedgerStatus.AmbiguousFailure, ambiguous, offlineOrigin: true);
+
+                // The log said "paused" before but nothing persisted one. Without the durable
+                // marker the periodic loop (or the next Sync Now) would try the next counter
+                // and break the ZIMRA sequence. Hold the whole queue for the operator.
+                _queue.Pause(item, ambiguous);
                 _log.Error(
                     $"Offline receipt {label} sync is UNKNOWN: {ambiguous}. " +
                     "The queue is paused; reconcile with the server before retrying.");
-                return new OfflineSyncOutcome(synced, _queue.Count, true, ambiguous);
+                return new OfflineSyncOutcome(synced, _queue.Count, true, ambiguous, Paused: true);
             }
 
             return new OfflineSyncOutcome(synced, 0, true, null);

@@ -107,31 +107,91 @@ public sealed class InterceptorConfig
             throw new InvalidOperationException("No configuration path supplied.");
         }
 
-        var dir = Path.GetDirectoryName(target);
-        if (!string.IsNullOrEmpty(dir))
+        var fullPath = Path.GetFullPath(target);
+        var dir = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrEmpty(dir))
         {
-            Directory.CreateDirectory(dir);
+            throw new InvalidOperationException($"No directory in configuration path '{target}'.");
         }
 
-        // Serialise without the secret, then restore it in memory. A save must not
-        // be able to put the key on disk, whatever the caller assigned to it.
-        var persisted = ApiKey;
+        Directory.CreateDirectory(dir);
+        // Restrict before writing: config.json may still carry a legacy plaintext
+        // key, and a new file must never appear under the folder's inherited ACL.
+        SecretStore.RestrictDirectory(dir);
+        if (File.Exists(fullPath))
+        {
+            SecretStore.RestrictFile(fullPath);
+        }
+
+        // A snapshot is serialised, never the live object. Save must not blank the
+        // key in memory even for a moment, nor write it back to disk.
         string json;
         lock (_saveGate)
         {
-            ApiKey = "";
-            try
-            {
-                json = JsonSerializer.Serialize(this, JsonOptions);
-            }
-            finally
-            {
-                ApiKey = persisted;
-            }
+            json = JsonSerializer.Serialize(WithoutApiKey(), JsonOptions);
         }
 
-        File.WriteAllText(target, json);
+        var temp = Path.Combine(dir, "." + Path.GetFileName(fullPath) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                // Restrict the empty temp file before a single byte is written.
+                SecretStore.RestrictFile(temp);
+                using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false));
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temp, fullPath, overwrite: true);
+            SecretStore.RestrictFile(fullPath);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                if (File.Exists(temp))
+                {
+                    File.Delete(temp);
+                }
+            }
+            catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException)
+            {
+                // The temp holds no secret beyond what config.json already had.
+            }
+
+            throw new IOException(
+                $"Could not save configuration to {fullPath} with restricted permissions: {ex.Message}", ex);
+        }
     }
+
+    /// <summary>
+    /// A shallow copy for serialisation. Nested sections are shared (serialising
+    /// them does not mutate them), and Parse.VatInclusive stays derived from the
+    /// same VatFlag that is persisted.
+    /// </summary>
+    private InterceptorConfig WithoutApiKey() => new()
+    {
+        ListenAddress = ListenAddress,
+        ListenPort = ListenPort,
+        ReadIdleTimeoutSeconds = ReadIdleTimeoutSeconds,
+        MaxJobBytes = MaxJobBytes,
+        ApiEndpoint = ApiEndpoint,
+        ApiKey = "",
+        ApiTimeoutSeconds = ApiTimeoutSeconds,
+        ApiKeepWarmSeconds = ApiKeepWarmSeconds,
+        GhostscriptPath = GhostscriptPath,
+        GhostscriptTimeoutSeconds = GhostscriptTimeoutSeconds,
+        SetupCompleted = SetupCompleted,
+        Company = Company,
+        Printing = Printing,
+        Parse = Parse,
+        Storage = Storage,
+        Offline = Offline,
+        Reconcile = Reconcile,
+        ConfigPath = ConfigPath
+    };
 
     public string ResolveDataDirectory()
     {
@@ -210,11 +270,6 @@ public sealed class InterceptorConfig
         if (Printing.Copies is < 1 or > 5)
         {
             errors.Add("printing.copies must be between 1 and 5.");
-        }
-
-        if (Parse.VatRate is < 0 or > 1)
-        {
-            errors.Add("parse.vatRate must be a fraction between 0 and 1.");
         }
 
         foreach (var parseError in Parse.ValidateRules())
@@ -368,10 +423,12 @@ public sealed class StorageConfig
 /// The receipt-layout rule set. It is the resolved half of a parse profile: a profile
 /// file names these rules, and picking the profile writes them here, so the config is
 /// always self-sufficient even if the profile file is later removed.
-/// Everything in here describes *where text is found* and *how a line declares its VAT
-/// status*. What must add up — qty × price, the printed total, the column scoring — stays
-/// in the parser and cannot be configured, so an imported profile can widen support
-/// without weakening fiscal correctness.
+/// Everything in here describes *where text is found*, *how a line declares its VAT
+/// status* and the local STANDARD percentage used when the paper prints no rate. What must
+/// add up — qty × price, the printed total, the column scoring — stays in the parser and
+/// cannot be configured, so an imported profile can widen support without weakening fiscal
+/// correctness. The gateway is still told only taxType and taxInclusive: the charge rate
+/// belongs to the company profile behind the API key.
 /// </summary>
 public sealed class ParseConfig
 {
@@ -393,6 +450,25 @@ public sealed class ParseConfig
 
     /// <summary>"1" = printed item prices include VAT, "0" = prices exclude VAT.</summary>
     public string VatFlag { get; set; } = "1";
+
+    /// <summary>
+    /// Readable view of <see cref="VatFlag"/> so a profile can state the pricing basis by name.
+    /// Setting it writes the flag the gateway and the printed copy both read; it is derived,
+    /// so it is not a second value in config.json.
+    /// </summary>
+    [JsonIgnore]
+    public bool VatInclusive
+    {
+        get => string.Equals((VatFlag ?? "").Trim(), "1", StringComparison.Ordinal);
+        set => VatFlag = value ? "1" : "0";
+    }
+
+    /// <summary>
+    /// Local STANDARD rate as a fraction (0.15 = 15%). Used
+    /// for the printed copy, the fiscal-day report and offline taxes, and as the fallback when a
+    /// POS prints VAT as money instead of a rate. Never sent to the gateway; ZERO_RATED and
+    /// EXEMPT lines always carry 0.
+    /// </summary>
     public double VatRate { get; set; } = 0.15;
 
     /// <summary>Marks a line as VAT-bearing when present in the item name. Empty = all standard.</summary>
@@ -402,9 +478,8 @@ public sealed class ParseConfig
     public string NonTaxSymbol { get; set; } = "";
 
     /// <summary>
-    /// The bucket given to an item line that carries no tax marker anywhere. This chooses
-    /// the ZIMRA tax bucket only; the rate the gateway charges comes from the company
-    /// profile behind the API key, never from here.
+    /// The bucket given to an item line that carries no tax marker anywhere. Choose STANDARD
+    /// (with vatRate), ZERO_RATED or EXEMPT. Printed markers always win over this default.
     /// </summary>
     public string DefaultTaxType { get; set; } = TaxTypeStandard;
 
@@ -482,6 +557,11 @@ public sealed class ParseConfig
         foreach (var patternError in Patterns.Validate())
         {
             errors.Add(patternError);
+        }
+
+        if (VatRate is < 0 or > 1)
+        {
+            errors.Add("parse.vatRate must be a fraction between 0 and 1.");
         }
 
         if (Limits.LineTolerance is <= 0 or > 100)
@@ -696,9 +776,11 @@ public sealed class ParseConfig
     /// <summary>
     /// A complete snapshot of the layout rules, for "save the working configuration as a
     /// profile". How a line <em>declares</em> its VAT status, and how the document says it is
-    /// a return, are both part of the layout, so they travel with the profile. The numbers a
-    /// receipt is fiscalised with — vatRate, vatFlag, currencies, payment method and the legacy
-    /// name-symbol knobs — are deliberately left out: a profile must not be able to change them.
+    /// a return, are both part of the layout, so they travel with the profile. So do the local
+    /// STANDARD vatRate and whether the POS prints VAT-inclusive prices. Currencies, payment
+    /// method and the legacy name-symbol knobs stay out: a profile must not be able to change
+    /// them. The gateway still gets only taxType and taxInclusive — the charge rate is the
+    /// company's, behind the API key.
     /// </summary>
     public ParseProfileRules ExportRules() => new()
     {
@@ -724,6 +806,8 @@ public sealed class ParseConfig
         ItemTableHeaderAnyOf = ItemTableHeaderAnyOf,
         ItemTableEndMarkers = ItemTableEndMarkers,
         DefaultTaxType = DefaultTaxType,
+        VatRate = VatRate,
+        VatInclusive = VatInclusive,
         TaxRules = TaxRules
             .Select(rule => new TaxMarkerRule
             {
@@ -963,7 +1047,14 @@ public sealed class ParsePatterns
         var errors = new List<string>();
 
         Check(errors, "invoiceNumber", InvoiceNumber, "value");
-        Check(errors, "invoiceRow", InvoiceRow, "name", "qty", "price", "disc", "vat", "exclusive");
+        // A row prints VAT either as a percentage (disc + vat columns) or as money
+        // (vatAmount). Both contracts are usable; any other set of groups is not.
+        CheckEither(
+            errors,
+            "invoiceRow",
+            InvoiceRow,
+            new[] { "name", "qty", "price", "disc", "vat", "exclusive" },
+            new[] { "name", "qty", "price", "vatAmount", "exclusive" });
         Check(errors, "twoLineQuantity", TwoLineQuantity, "price", "qty");
         Check(errors, "twoLineNameAmount", TwoLineNameAmount, "name", "amount");
         Check(errors, "currencyBeforeAmount", CurrencyBeforeAmount);
@@ -972,6 +1063,42 @@ public sealed class ParsePatterns
         Check(errors, "email", Email);
 
         return errors;
+    }
+
+    private static void CheckEither(
+        List<string> errors,
+        string name,
+        string pattern,
+        params string[][] alternatives)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+        {
+            errors.Add($"parse.patterns.{name} is empty.");
+            return;
+        }
+
+        try
+        {
+            var regex = new System.Text.RegularExpressions.Regex(
+                pattern,
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(200));
+
+            var declared = new HashSet<string>(regex.GetGroupNames(), StringComparer.Ordinal);
+            if (alternatives.Any(groups => groups.All(declared.Contains)))
+            {
+                return;
+            }
+
+            var missing = alternatives[0].Where(group => !declared.Contains(group)).ToArray();
+            errors.Add(
+                $"parse.patterns.{name} is missing the group(s) {string.Join(", ", missing)} " +
+                "(or the name, qty, price, vatAmount, exclusive amount-column set).");
+        }
+        catch (ArgumentException ex)
+        {
+            errors.Add($"parse.patterns.{name} is not a valid regular expression: {ex.Message}");
+        }
     }
 
     private static void Check(List<string> errors, string name, string pattern, params string[] groups)

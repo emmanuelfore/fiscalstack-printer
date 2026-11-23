@@ -461,12 +461,33 @@ public sealed class ReceiptParser
             return false;
         }
 
-        if (!TryParseMoney(match.Groups["price"].Value, out var unitPrice) ||
-            !TryParseMoney(match.Groups["disc"].Value, out var discountPercent) ||
-            !TryParseMoney(match.Groups["vat"].Value, out var vatPercent) ||
+        // A POS that prints VAT as money exposes it as vatAmount. That is a total column,
+        // not a rate: the bucket and the percentage come from the configured tax rules.
+        var hasVatAmount = match.Groups["vatAmount"].Success;
+        var vatAmount = 0m;
+        if (hasVatAmount && !TryParseMoney(match.Groups["vatAmount"].Value, out vatAmount))
+        {
+            error = "Invoice row has an invalid VAT amount.";
+            return false;
+        }
+
+        var unitPrice = 0m;
+        var discountPercent = 0m;
+        var vatPercent = 0m;
+        if (!TryParseMoney(match.Groups["price"].Value, out unitPrice) ||
             !TryParseMoney(match.Groups["exclusive"].Value, out var exclusiveTotal))
         {
-            error = "Invoice row has invalid price, discount, VAT or amount columns.";
+            error = "Invoice row has an invalid price or amount column.";
+            return false;
+        }
+
+        // A percent row must state its discount and VAT columns. An amount row prints no
+        // rate at all, so it needs neither — inventing a 0% group would only hide a bad row.
+        if (!hasVatAmount &&
+            (!TryParseMoney(match.Groups["disc"].Value, out discountPercent) ||
+             !TryParseMoney(match.Groups["vat"].Value, out vatPercent)))
+        {
+            error = "Invoice row has invalid discount or VAT columns.";
             return false;
         }
 
@@ -489,13 +510,17 @@ public sealed class ReceiptParser
             return false;
         }
 
-        var inclusive = Math.Round(exclusive * (1m + vatRate), 2);
+        var inclusive = hasVatAmount
+            ? Math.Round(exclusive + Math.Abs(vatAmount), 2)
+            : Math.Round(exclusive * (1m + vatRate), 2);
         var amount = hasInclusive ? Math.Abs(inclusiveTotal) : inclusive;
         if (hasInclusive)
         {
             if (Math.Abs(inclusive - amount) > LineTolerance)
             {
-                error = $"Invoice row exclusive total ({exclusive:0.00}) plus VAT ({vatPercent:0.##}%) does not match its inclusive total ({amount:0.00}).";
+                error = hasVatAmount
+                    ? $"Invoice row exclusive total ({exclusive:0.00}) plus VAT amount ({Math.Abs(vatAmount):0.00}) does not match its inclusive total ({amount:0.00})."
+                    : $"Invoice row exclusive total ({exclusive:0.00}) plus VAT ({vatPercent:0.##}%) does not match its inclusive total ({amount:0.00}).";
                 return false;
             }
         }
@@ -510,17 +535,25 @@ public sealed class ReceiptParser
         bucket = ResolveTaxBucket(
             $"{pendingName} {match.Value}",
             TaxRowSlotTokens(match),
-            vatRate,
+            hasVatAmount ? null : vatRate,
             sectionTaxType);
 
         // The row's own columns stay the source of the money; the bucket only decides which
-        // ZIMRA tax ID the gateway files it under.
+        // ZIMRA tax ID the gateway files it under. A VAT amount column prints no rate, so a
+        // STANDARD line falls back to the rate configured for this till (the API rate).
         var itemRate = bucket.TaxType == ParseConfig.TaxTypeStandard
             ? (vatRate > 0 ? vatRate : (decimal)_config.VatRate)
             : 0m;
 
         var signedAmount = sign * amount;
-        item = new ParsedItem(name, quantity, signedAmount / quantity, Math.Round(signedAmount, 2), bucket.TaxType, itemRate);
+        item = new ParsedItem(
+            name,
+            quantity,
+            signedAmount / quantity,
+            Math.Round(signedAmount, 2),
+            bucket.TaxType,
+            itemRate,
+            exclusive / Math.Abs(quantity));
         return true;
     }
 
@@ -707,7 +740,7 @@ public sealed class ReceiptParser
         return Math.Round(amount * rate, 2);
     }
 
-    private bool IsVatInclusive => _config.VatFlag.Trim() == "1";
+    private bool IsVatInclusive => _config.VatInclusive;
 
     /// <summary>
     /// The VAT bucket chosen for one line, how it was chosen — which is what turns "the
@@ -1509,6 +1542,13 @@ public sealed class ReceiptParser
         {
             if (TryParseMoney(tokens[i], out var value))
             {
+                // Palladium prints a credit total as "-USD 1.16": the sign belongs to the
+                // currency token, while the right-to-left scan lands on "1.16" first.
+                if (i > 0 && SignedCurrencyPrefix(tokens[i - 1], out var sign))
+                {
+                    value = sign * Math.Abs(value);
+                }
+
                 return value;
             }
         }
@@ -1523,6 +1563,38 @@ public sealed class ReceiptParser
         }
 
         return null;
+    }
+
+    private static bool SignedCurrencyPrefix(string token, out int sign)
+    {
+        sign = 1;
+
+        // The currency may share a token with its label, e.g. "Total:-USD 1.16", so look
+        // for the signed currency at the end of the preceding token rather than its start.
+        var end = token.Length - 1;
+        while (end >= 0 && !char.IsLetterOrDigit(token[end]))
+        {
+            end--;
+        }
+
+        if (end < 0)
+        {
+            return false;
+        }
+
+        var start = end;
+        while (start >= 0 && char.IsLetter(token[start]))
+        {
+            start--;
+        }
+
+        if (start < 0 || start == end || (token[start] != '-' && token[start] != '+'))
+        {
+            return false;
+        }
+
+        sign = token[start] == '-' ? -1 : 1;
+        return true;
     }
 
     private static string[] SplitTokens(string line) =>

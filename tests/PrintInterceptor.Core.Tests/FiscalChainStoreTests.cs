@@ -75,6 +75,61 @@ public class FiscalChainStoreTests
         }
     }
 
+    /// <summary>
+    /// Protecting the signed receipt happens under the chain lock but before the counter is
+    /// persisted. If protection fails, the same counter must still be available for a retry.
+    /// </summary>
+    [Fact]
+    public void AFailedBeforeCommitCallbackLeavesTheChainUntouched()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            var store = new FiscalChainStore(directory, NullLog.Instance);
+            store.SeedFromServer("1234567890", new OfflineState
+            {
+                DeviceId = "1234567890",
+                LastFiscalHash = "PREVIOUS",
+                CurrentFiscalDayNo = 12,
+                DailyReceiptCount = 34,
+                LastReceiptGlobalNo = 1055
+            });
+
+            using var key = RSA.Create(2048);
+            var attempts = 0;
+            var issued = store.TrySignNext(
+                "1234567890",
+                snapshot => OfflineSigner.Sign(Request(snapshot), key),
+                out _,
+                out var error,
+                beforeCommit: _ =>
+                {
+                    attempts++;
+                    return (false, "disk is full");
+                });
+
+            Assert.False(issued);
+            Assert.Equal(1, attempts);
+            Assert.Contains("disk is full", error);
+
+            Assert.True(store.TryGetCurrent("1234567890", out var current, out _));
+            Assert.Equal(34, current.ReceiptCounter);
+            Assert.Equal(1055, current.ReceiptGlobalNo);
+
+            Assert.True(store.TrySignNext(
+                "1234567890",
+                snapshot => OfflineSigner.Sign(Request(snapshot), key),
+                out var signed,
+                out error));
+            Assert.Equal(35, signed.ReceiptCounter);
+            Assert.Equal(1056, signed.ReceiptGlobalNo);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void OnlineReceiptsAdvanceTheChainButNeverRewindIt()
     {
@@ -115,6 +170,63 @@ public class FiscalChainStoreTests
             });
 
             Assert.True(store.TryGetCurrent("1234567890", out current, out _));
+            Assert.Equal(101, current.ReceiptGlobalNo);
+            Assert.Equal("H2", current.LastHash);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void OnlineResponsesNeverRewindTheDayOrCounter()
+    {
+        var directory = TempDirectory();
+        try
+        {
+            var store = new FiscalChainStore(directory, NullLog.Instance);
+            store.SeedFromServer("1234567890", new OfflineState
+            {
+                LastFiscalHash = "H1",
+                CurrentFiscalDayNo = 3,
+                DailyReceiptCount = 7,
+                LastReceiptGlobalNo = 100
+            });
+
+            // A new fiscal day legitimately restarts the daily counter, with a new global number.
+            store.RecordOnlineSuccess("1234567890", new FiscalizeResponse
+            {
+                FiscalCode = "H2",
+                ReceiptNumber = 101,
+                Receipt = new FiscalReceipt { ReceiptCounter = 2, ReceiptGlobalNo = 101, FiscalDayNo = 4 }
+            });
+
+            Assert.True(store.TryGetCurrent("1234567890", out var current, out _));
+            Assert.Equal(4, current.FiscalDayNo);
+            Assert.Equal(2, current.ReceiptCounter);
+            Assert.Equal(101, current.ReceiptGlobalNo);
+            Assert.Equal("H2", current.LastHash);
+
+            // An older day with a bigger counter must not drag the chain back a day.
+            store.RecordOnlineSuccess("1234567890", new FiscalizeResponse
+            {
+                FiscalCode = "OLD-DAY",
+                ReceiptNumber = 102,
+                Receipt = new FiscalReceipt { ReceiptCounter = 99, ReceiptGlobalNo = 102, FiscalDayNo = 2 }
+            });
+
+            // The same global number with a lower counter and another hash must not rewind either.
+            store.RecordOnlineSuccess("1234567890", new FiscalizeResponse
+            {
+                FiscalCode = "REPLAY",
+                ReceiptNumber = 101,
+                Receipt = new FiscalReceipt { ReceiptCounter = 1, ReceiptGlobalNo = 101, FiscalDayNo = 4 }
+            });
+
+            Assert.True(store.TryGetCurrent("1234567890", out current, out _));
+            Assert.Equal(4, current.FiscalDayNo);
+            Assert.Equal(2, current.ReceiptCounter);
             Assert.Equal(101, current.ReceiptGlobalNo);
             Assert.Equal("H2", current.LastHash);
         }

@@ -16,7 +16,7 @@ public static class FiscalizeRequestFactory
 {
     public static FiscalizeRequest Create(ParsedReceipt receipt, ParseConfig config)
     {
-        var taxInclusive = string.Equals(config.VatFlag.Trim(), "1", StringComparison.Ordinal);
+        var taxInclusive = config.VatInclusive;
         var transactionType = TransactionType(receipt.TransactionType);
 
         var request = new FiscalizeRequest
@@ -33,9 +33,11 @@ public static class FiscalizeRequestFactory
                 {
                     Name = item.Name.Trim(),
                     // A correction is signed by the gateway from transactionType, and the
-                    // schema rejects a negative price or quantity outright.
+                    // schema rejects a negative price or quantity outright. An exclusive
+                    // layout must send the row's ex-VAT column, not the inclusive total the
+                    // parser keeps for the printed copy and the printed-total guard.
                     Quantity = Math.Abs(item.Quantity),
-                    UnitPrice = Math.Abs(item.UnitPrice),
+                    UnitPrice = Math.Abs(taxInclusive ? item.UnitPrice : item.ExclusiveUnitPrice ?? item.UnitPrice),
                     TaxType = TaxType(item.TaxType),
                     TaxInclusive = taxInclusive
                 })

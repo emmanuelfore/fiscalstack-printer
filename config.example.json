@@ -55,11 +55,13 @@
       { "keyword": "ZWL", "name": "ZWG" }
     ],
     "vatFlag": "1",
+    "//vatFlag": "\"1\" = the POS prints VAT-inclusive prices, \"0\" = VAT is added on top. A profile may override this with vatInclusive: true|false; the gateway is told through taxInclusive, never a rate.",
+    "//vatRate": "Local STANDARD rate as a fraction (0.15 = 15%); used for the printed copy, reports and when a POS prints VAT as money. A profile may set it; the gateway still charges the company rate behind the API key.",
     "vatRate": 0.15,
     "taxSymbol": "",
     "nonTaxSymbol": "",
 
-    "//layout": "Everything below is a parsing profile's vocabulary: where the text is looked for. 'profile' only records which profile was applied - the rules themselves live here, so this file stays the single source of truth. Picking a profile in Settings rewrites these keys; see profiles/sage.json for every field, including the optional 'patterns' (regex overrides) and 'limits' (tolerances), which default to the built-in values when omitted.",
+    "//layout": "Everything below is a parsing profile's vocabulary: where the text is looked for. 'profile' only records which profile was applied - the rules themselves live here, so this file stays the single source of truth. Picking a profile in Settings rewrites these keys, including vatFlag from the profile's vatInclusive; see profiles/sage.json for every field, including the optional 'patterns' (regex overrides) and 'limits' (tolerances), which default to the built-in values when omitted.",
     "dateLabels": ["Date", "Dated"],
     "dateFormats": [
       "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy",

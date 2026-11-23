@@ -12,7 +12,11 @@ public sealed record ParsedItem(
     decimal UnitPrice,
     decimal Amount,
     string TaxType,
-    decimal TaxRate);
+    decimal TaxRate,
+    // The row's ex-VAT price when the parser saw both the net and the VAT columns.
+    // Used when the till's pricing basis is exclusive, so the gateway is not handed an
+    // inclusive price labelled as ex-VAT.
+    decimal? ExclusiveUnitPrice = null);
 
 public sealed class ParsedBuyer
 {

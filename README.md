@@ -37,13 +37,19 @@ POS ──► "FiscalStack Fiscal Printer" (virtual, raw TCP 127.0.0.1:9100)
   counters can be provisioned and cached. Nothing else is configured locally.
 - **Ghostscript** only if the virtual printer uses a PostScript or PDF driver
   (`Generic / Text Only` needs no Ghostscript). `packaging\build-release.ps1` bundles it
-  into the release by default, so a till needs no separate install; build with
-  `-NoGhostscript` to leave it out, or `-GhostscriptDir` to say which install to copy.
-  Otherwise install 64-bit Ghostscript on the till and add `gswin64c.exe` to `PATH` / set
-  `ghostscriptPath`. The app checks the config value, then `<exe folder>\ghostscript\bin`,
-  then `PATH`, then `Program Files\gs`.
-  Copying those binaries into a package you distribute is conveying them under AGPL-3.0;
-  [packaging/README.md](packaging/README.md#ghostscript-in-the-package) states what that obliges.
+  into the release by default; the bundled `<exe folder>\ghostscript\bin\gswin64c.exe` is
+  preferred, so a till needs no separate install. Build with `-NoGhostscript` to leave it
+  out, or `-GhostscriptDir` to say which install to copy. Otherwise install 64-bit
+  Ghostscript under `Program Files\gs` and leave `ghostscriptPath` empty. Resolution order
+  is a trusted configured path, the bundled copy, a trusted Program Files install, then
+  trusted `PATH` entries (OS locations such as `/usr` and `/opt` on Linux).
+  This is a security control: Ghostscript parses untrusted print jobs while the service may
+  run elevated. A `ghostscriptPath` under a user profile or an arbitrary `PATH` folder is
+  rejected, as is a symlink/junction resolving out of a trusted folder; the app checks the
+  final target before every launch. An untrusted configured value is logged and ignored,
+  not executed. Copying those binaries into a package you distribute is conveying them
+  under AGPL-3.0; [packaging/README.md](packaging/README.md#ghostscript-in-the-package)
+  states what that obliges.
 
 ## Build
 
@@ -68,15 +74,18 @@ and an Inno Setup `.exe` that installs the virtual printer, config, ACLs and eit
 service or tray autostart:
 
 ```powershell
+# Preferred: sign with a certificate already in the Windows store (or an HSM)
+.\packaging\build-release.ps1 -Version 1.2.0 -Thumbprint 0123456789ABCDEF...
+# A PFX is imported into the current-user store first; its password is never on a command line
 .\packaging\build-release.ps1 -Version 1.2.0 -PfxPath C:\keys\fiscalstack.pfx
 ```
 
 The setup is unattended-capable (`/VERYSILENT /TASKS="printer"`), keeps the API key out
-of `config.json` (machine environment instead), preserves fiscal data on uninstall, and
-avoids the installer being signed twice. See [`packaging/README.md`](packaging/README.md)
-for prerequisites, signing options, direct `install.ps1` usage, how the Ghostscript bundle
-is chosen and what AGPL-3.0 requires of whoever ships it, and the Windows-only
-verification checklist.
+of `config.json` (register it on the till after install), preserves fiscal data on
+uninstall, and avoids the installer being signed twice. See
+[`packaging/README.md`](packaging/README.md) for prerequisites, signing options, direct
+`install.ps1` usage, how the Ghostscript bundle is chosen and what AGPL-3.0 requires of
+whoever ships it, and the Windows-only verification checklist.
 
 ## 1. Install the virtual printer
 
@@ -112,7 +121,7 @@ most:
 | Key | Purpose |
 | --- | --- |
 | `listenPort` | Must match the virtual printer port (default `9100`). |
-| `apiEndpoint`, `apiKey` | FiscalStack tenant and pass-through key. Without a key, jobs are held for review. |
+| `apiEndpoint`, `apiKey` | FiscalStack endpoint and tenant key. `apiKey` is read for legacy configs only; register the key with `--register-key` or Settings so it stays out of this file. Without a key, jobs are held for review. |
 | `printing.printerName` | Real till printer for the thermal receipt. Empty = Windows default. |
 | `printing.format` | `thermal`, `a4`, or `auto` (A4 when the captured job was a PDF, thermal otherwise). See [A4 invoices](#a4-invoices). |
 | `printing.a4PrinterName` | A4/laser printer for invoice output. Empty = `printing.printerName`, then the Windows default. |
@@ -120,7 +129,7 @@ most:
 | `printing.template` | `fiscal` (this app's layout) or `original` (the POS's own document with the fiscal proof stamped on it). See [Print the POS's own invoice](#print-the-poss-s-own-invoice). |
 | `printing.accentColor` | Accent used by the fiscal layouts (rules, table header, totals). Defaults to `#4F46E5`, the indigo of the sample invoice. |
 | `printing.enabled` | `false` fiscalises without printing (use only knowingly). |
-| `ghostscriptPath` | `gswin64c.exe` path when PostScript/PDF jobs are captured. Leave empty for a bundled or PATH install. |
+| `ghostscriptPath` | Optional `gswin64c.exe` path. Accepted only under the app folder, Program Files or a trusted OS location (symlinks/junctions resolved); leave empty to use the bundled copy. See [Requirements](#requirements). |
 | `company` | Printed on the fiscal document. `email` and `logoPath` are used by the A4 layout; `logoPath` is relative to the config folder. |
 | `parse.*` | The layout rules for this POS: markers, labels, keywords, date formats, line patterns and tolerances. See [Parsing profiles](#parsing-profiles). |
 | `offline.enabled` | Sign receipts on the till when the API is unreachable. Everything it needs (device, key, taxes, counters) is provisioned from FiscalStack with the API key; see [Offline signing](#offline-signing). |
@@ -128,7 +137,9 @@ most:
 | `reconcile.*` | How the app resolves a fiscalisation whose answer it could not read. See [Reconciling an unknown receipt](#reconciling-an-unknown-receipt). |
 
 `parse.vatFlag` follows FiscalStack convention: `"1"` means printed prices include VAT,
-`"0"` means VAT is added on top. `parse.productStartLine` / `productEndLine` support
+`"0"` means VAT is added on top. A parsing profile can state the same choice as
+`vatInclusive: true|false`, which overrides this till setting when the profile is applied;
+the shipped Palladium profile sets it to `true`. `parse.productStartLine` / `productEndLine` support
 `Order No.` / `Items count`-style markers; when empty, the parser detects the item block
 automatically. Receipts that wrap an item over two lines (`34400 x 2.400`, then
 `NAME *82,560.00`) are parsed as a fallback when no single-line columns balance.
@@ -141,17 +152,75 @@ https://fiscalstack.co.zw/api/v1/    →  POST https://fiscalstack.co.zw/api/v1/
 
 The key is sent as the `X-API-Key` header. Generate it in FiscalStack under the company's
 API settings (`POST /api/companies/:id/api-keys/generate`, owner only). It is shown once and
-starts with `sk_test_` or `sk_live_`; paste it into `apiKey`. To keep the secret out of
-`config.json`, set the `PRINTINTERCEPTOR_API_KEY` environment variable instead — it
-overrides the file at startup. Restrict the config file's ACL to Administrators and SYSTEM,
-since the service runs as LocalSystem.
+starts with `sk_test_` or `sk_live_`. **Register it on the till** — do not paste it into
+`apiKey` in `config.json`:
+
+```powershell
+.\publish\PrintInterceptor.exe --register-key    # hidden prompt; DPAPI + ACL, no shell history
+```
+
+The tray's **Settings → API key** does the same. See [Secret management](#secret-management)
+for rotation and why a machine environment variable is only a legacy fallback.
 
 Other environment overrides:
 
 | Variable | Effect |
 | --- | --- |
 | `PRINTINTERCEPTOR_CONFIG` | Full path to `config.json` (same as `--config`). |
-| `PRINTINTERCEPTOR_API_KEY` | Replaces `apiKey` from the file. |
+| `PRINTINTERCEPTOR_API_KEY` | Legacy fallback: replaces `apiKey` from the file. Weaker than the secret store; see [Secret management](#secret-management). |
+
+## Secret management
+
+A till holds two credentials: the **FiscalStack API key** (tenant identity) and, when
+offline signing is on, the **ZIMRA device private key**. Neither belongs in `config.json`,
+a backup script, or a deployment variable.
+
+### Registering and rotating the API key
+
+- `PrintInterceptor.exe --register-key` is the **default path**. It prompts for the key
+  without echo, reads it from stdin when piped, and writes it to the machine-bound secret
+  store at `<config folder>\secrets\api-key.protected`. The key never appears on a command
+  line, in PowerShell history, or in a process listing. The tray's **Settings → API key**
+  is the equivalent GUI path.
+- `Save` serialises a copy of the configuration with `apiKey: ""`, writes it atomically and
+  flushes to disk; it never blanks the live in-memory key. A key found in an old
+  `config.json` is migrated into the store and the file is rewritten without it.
+- **Rotate** by generating a new key in FiscalStack, running `--register-key` again with the
+  new value (it overwrites the stored blob), then restarting the service or tray. Revoke the
+  old key in FiscalStack once the till has used the new one. `--clear-key` removes the local
+  copy; receipts are then held for review until a key is registered again.
+- If a legacy `PRINTINTERCEPTOR_API_KEY` machine variable is present, remove it after
+  registering: `[Environment]::SetEnvironmentVariable("PRINTINTERCEPTOR_API_KEY", $null, "Machine")`.
+  The store takes precedence, but leaving the variable around keeps a second readable copy.
+
+### DPAPI + ACL design
+
+Each entry is a `LocalMachine`-scope DPAPI blob bound to this app's entropy, written to a
+file with restrictive NTFS ACLs (SYSTEM, Administrators and the running till account; no
+inheritance). **Both layers matter**: DPAPI stops a copied blob being read elsewhere, but
+Windows lets any local account use the machine master key, so the file ACL is what actually
+stops a local user decrypting it. The root, config, data and secrets folders are restricted
+on install; the config and secrets folders are re-restricted on save. The code fails closed
+when an ACL cannot be applied. A stored blob is only used on the machine that created it —
+a restored image needs the key registered again.
+
+### Why machine environment variables are weaker
+
+`PRINTINTERCEPTOR_API_KEY` is stored in the registry, which any local account can read, and
+it tends to be copied into imaging scripts, support notes and process dumps. It remains as
+a transitional fallback for older deployments, but it is not the recommended way to put a
+key on a till. `install.ps1 -ApiKey` is deprecated for the same reason.
+
+### Offline private-key protection
+
+`offline.enabled` needs the ZIMRA device key. Press **Settings → Refresh from FiscalStack**
+while online: the key is stored as `secrets\device-key.protected` through the same DPAPI +
+ACL path. `data\state\offline-provisioning.json` caches only device id, serial, tax buckets,
+QR URL and counters — never the private key. A plaintext key left by an older build is
+stripped from that cache on startup and is never used for signing. If the store is missing,
+unavailable or cannot be written (for example an ACL failure), offline signing refuses to
+start with an actionable message instead of falling back to the file. Re-provision while
+online after restoring store access.
 
 ## Parsing profiles
 
@@ -159,12 +228,13 @@ Every rule the parser uses to *find* text — section markers, field labels, non
 keywords, date formats, the collapsed-invoice-table header words, the line-shape regular
 expressions and the numeric tolerances — lives under `parse.*`. A **profile** is that rule
 set as a named JSON file, so supporting a new POS is importing a file instead of shipping a
-build. Two ship in `{app}\profiles`:
+build. Three ship in `{app}\profiles`:
 
 | Profile | Contents |
 | --- | --- |
 | `sage` | Every rule stated in full. This is the layout the parser was written for, so it doubles as the template to copy. |
 | `zohobooks` | Only what differs: `NUMBER:` instead of `Order No.:`, `Customer VAT No`, `Invoice Date`, and a `Notes:` line that ends the item table. |
+| `palladium` | Draft for Palladium Software A4 invoices and credit notes: `Number:`, `Customer Name`, MM/dd/yyyy dates, the concatenated `Line Description`/`Quantity`/`Price Inc`/`VAT`/`Total Inc` row (VAT read as money), `Reference:` on credit notes, and configurable `defaultTaxType` / `vatRate` / `vatInclusive` (set to `true`). |
 
 A profile states only the lines it changes; everything it leaves out keeps the built-in
 value. Profiles are read from two folders, and an installed file replaces the shipped one of
@@ -188,16 +258,17 @@ profile is only ever applied when an operator presses the button. The parser rea
 when it starts, so an applied profile takes effect after PrintInterceptor (or the service)
 restarts.
 
-**What a profile cannot change.** A profile decides where text is found and how a line
-declares its VAT status, never what must add
-up. `qty × price = amount`, agreement with the printed total, and the column scoring stay in
-code, and `vatRate`, `vatFlag`, `currencies`, `paymentMethod` and the `taxSymbol` /
-`nonTaxSymbol` knobs are deliberately not profile
-fields — importing a layout can never move the numbers a receipt is fiscalised with. An
-import is rejected before it lands if a pattern is missing a group the parser reads (`value`,
-`name`, `qty`, `price`, `disc`, `vat`, `exclusive`, `amount`), does not compile, uses a
-`dateFormats` entry with no date tokens, sets a tolerance outside its sane range, names a tax
-type other than `STANDARD`, `ZERO_RATED` or `EXEMPT`, or uses a
+**What a profile cannot change.** A profile decides where text is found, which default VAT
+bucket the till uses (`defaultTaxType`), the STANDARD percentage (`vatRate`) when the paper
+prints no rate, and whether prices are VAT-inclusive (`vatInclusive`). It never changes what
+must add up: `qty × price = amount`, agreement with the
+printed total, and the column scoring stay in code. `currencies`, `paymentMethod`
+and the `taxSymbol` / `nonTaxSymbol` knobs are deliberately not profile fields — importing a
+layout can never move currency or payment settings. An import is rejected before it lands if
+a pattern is missing a group the parser reads (`value`, `name`, `qty`, `price`, `disc`, `vat`,
+`exclusive`, `amount`), does not compile, uses a
+`dateFormats` entry with no date tokens, sets a tolerance outside its sane range, sets `vatRate`
+outside `0`–`1`, names a tax type other than `STANDARD`, `ZERO_RATED` or `EXEMPT`, or uses a
 name that could escape the profiles folder. Every pattern also runs under
 `parse.limits.regexTimeoutMilliseconds` (1000 by default): a hand-written expression that
 backtracks forever holds that one job for review instead of stalling the till.
@@ -232,11 +303,11 @@ the wrong line (a footer word that also names a column, like `Total`) is never o
 
 ### VAT status on the line
 
-Which bucket a line is filed under — `STANDARD`, `ZERO_RATED` or `EXEMPT` — is the only tax
-decision the till makes: the gateway maps it to a ZIMRA tax ID and charges the company rate
-behind the API key, so the rate itself is not read from the receipt and never travels with a
-profile. What does travel is the vocabulary for *reading* the bucket off the paper, because
-every POS prints it differently. A marker is honoured in three windows only:
+Which bucket a line is filed under — `STANDARD`, `ZERO_RATED` or `EXEMPT` — is the tax decision
+the till makes: the gateway maps it to a ZIMRA tax ID and charges the company rate behind the
+API key. The rate is not read from the receipt; a profile may set it with `vatRate` for a shop
+whose STANDARD rate is known. What also travels is the vocabulary for *reading* the bucket off
+the paper, because every POS prints it differently. A marker is honoured in three windows only:
 
 | Window | Where a marker may match | Example line |
 | --- | --- | --- |
@@ -257,6 +328,13 @@ every POS prints it differently. A marker is honoured in three windows only:
     "where": ["slot", "annotation"] }
 ]
 ```
+
+A row may print VAT as money instead of a percentage. A profile can expose that column as an
+optional `(?<vatAmount>...)` group on `patterns.invoiceRow` instead of the usual `disc` + `vat`
+columns; both group sets are accepted, and an amount row need not invent a 0% group. The parser
+adds the amount's magnitude to the exclusive total to get the included amount and tax total,
+while the rate still comes from `parse.vatRate` for a `STANDARD` line (`0` for `ZERO_RATED` and
+`EXEMPT`). A printed `0.16` is therefore sixteen cents of VAT, not a 16% rate.
 
 The A/B/C letters are the tax codes a ZIMRA till prints, the same ones `offline.taxes`
 provisions. The longest marker on a line wins — `NON-VAT` is a better statement than the `VAT`
@@ -324,13 +402,14 @@ so choose one mode per till.
   offline queue paused, or new receipts were held for review. The tray icon alone is easy to
   miss on a busy till.
 - **Settings** edits the endpoint, API key, print format and printers, paper width, the
-  [parsing profile](#parsing-profiles) and the offline switch, then writes `config.json`.
+  [parsing profile](#parsing-profiles), whether printed prices include VAT, and the offline
+  switch, then writes `config.json`.
   **Refresh from FiscalStack** provisions the ZIMRA
   device, key, tax buckets and counters and shows the result (device, serial, fiscal day,
   counters, key source). Printing changes apply on the next receipt; restart the app after
   changing the endpoint, API key, or offline signing, and after applying a parsing profile.
-  The private key itself is cached under
-  `data/state`, never written to `config.json`.
+  The private key itself is held in the DPAPI secret store under `secrets`, never in
+  `config.json` or the provisioning cache. See [Secret management](#secret-management).
 - **Start with Windows** writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so it
   applies to the user who ticks it, not to all users.
 
@@ -439,6 +518,22 @@ Run it before **Close fiscal day**: if the notes list a job whose outcome is unk
 *Reconcile unknown receipts now* first, so the day is reported closed on figures the till can
 actually read.
 
+## Health status for automation
+
+`--status --json` prints a read-only snapshot to stdout and exits. It needs no API key,
+starts no listener and writes no log line, so the updater and support tools can use it on
+a till whose gateway is down:
+
+```powershell
+.\publish\PrintInterceptor.exe --status --json
+```
+
+It reports the installed version, service state, capture-listener state, offline queue
+and recovery counts, sync-pause marker, stale in-flight jobs, ledger alerts and an overall
+`healthy` flag. `--service-name=NAME` overrides the queried Windows service name. The
+automatic updater refuses to touch a till that is not healthy; see
+[`packaging/README.md`](packaging/README.md#enable-auto-update).
+
 ## Company identity
 
 The printed name, TIN, VAT number, address, phone and logo come from FiscalStack. The desktop
@@ -473,7 +568,8 @@ to the driver's 1/100-inch units; Arial stands in for the embedded Helvetica bec
 metric twin that is guaranteed to exist on Windows. It is drawn directly through the Windows
 printer driver, so it prints silently from the service — no browser, WebView or PDF toolchain
 is required, and no PDF file is produced.
-`parse.vatFlag = "0"` switches the table to exclusive-VAT columns (`Amount (excl.)`).
+`parse.vatFlag = "0"` (or `vatInclusive: false` in a profile) switches the table to
+exclusive-VAT columns (`Amount (excl.)`) and sends that ex-VAT price to the gateway.
 
 The captured POS text is the source of the line items; the API response supplies totals,
 taxes and fiscal fields. Buyer name/TIN/VAT prefer the registered buyer returned by
@@ -547,7 +643,7 @@ Captured jobs: `data\jobs\yyyy-MM-dd\`. Durable state:
 | `data\state\offline-queue\` | One JSON file per signed receipt waiting to sync, oldest-first by filename. |
 | `data\state\offline-failed\` | Receipts the server rejected or that need reconciliation; never auto-retried. |
 | `data\state\offline-sync-pause.json` | Present while the sync queue is paused after a rejection. Delete only after reconciling, or use *Resume offline sync* in the tray. |
-| `data\state\offline-provisioning.json` | Cached device id, key, tax buckets and counters from FiscalStack for offline signing. |
+| `data\state\offline-provisioning.json` | Cached device id, serial, tax buckets and counters from FiscalStack. The private key lives in `secrets\device-key.protected`, not here. |
 
 The service runs as LocalSystem, so the configured printer must be visible to that account.
 
@@ -580,12 +676,14 @@ The till bootstraps itself from the API, like the mobile app: startup calls
 - the **counters and last fiscal hash**.
 
 The key identifies the tenant: `/api/zimra/*` is rewritten to the key's company, so no
-company id is configured or sent. The provisioned key and counters are cached in
-`data/state/offline-provisioning.json` (owner-only permissions on Unix; restrict the ACL on
-Windows), so a restart during an outage can still sign offline. The key is never written to
-`config.json`. Press **Refresh from FiscalStack** in tray Settings to provision or re-read
-the state; the dialog shows the device, serial, fiscal day, counters, key source and tax
-mapping.
+company id is configured or sent. The device private key is written only to the DPAPI
+secret store; the non-secret state is cached in `data/state/offline-provisioning.json`, so a
+restart during an outage can still sign offline. A plaintext key left in that cache by an
+older build is stripped on startup and never used. Offline signing refuses to start with an
+actionable error if the store is unavailable or the key cannot be protected. Press
+**Refresh from FiscalStack** in tray Settings to provision or re-read the state; the dialog
+shows the device, serial, fiscal day, counters, key source and tax mapping. See
+[Secret management](#secret-management).
 
 - `parse.vatFlag`, currency and the receipt date must be right. Offline receipts embed the
   till's clock (`yyyy-MM-ddTHH:mm:ss`), so a wrong clock produces a wrong receipt date.

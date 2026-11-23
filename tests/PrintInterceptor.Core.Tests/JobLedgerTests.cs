@@ -304,6 +304,21 @@ public sealed class JobLedgerTests : IDisposable
     }
 
     [Fact]
+    public void AnOfflineOriginJobIsNotOfferedForOnlineReconciliation()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.Claim("offline", "INV-OFF", "20261029", "source", 5m, "USD", "FiscalInvoice");
+        ledger.MarkFailure("offline", LedgerStatus.AmbiguousFailure, "sync timed out", offlineOrigin: true);
+
+        Assert.True(ledger.Get("offline")!.OfflineOrigin);
+        Assert.Empty(ledger.PendingReconcile(10, int.MaxValue, DateTimeOffset.Now, TimeSpan.FromMinutes(10)));
+
+        // The flag is sticky so a reprint cannot turn the pre-offline draft into a replay body.
+        ledger.MarkFailure("offline", LedgerStatus.Rejected, "operator closed the case");
+        Assert.True(ledger.Get("offline")!.OfflineOrigin);
+    }
+
+    [Fact]
     public void AJobInTheMiddleOfFiscalisingIsNotUnknownYet()
     {
         // InFlight only means "outcome unknown" once the request itself could not still be running.
@@ -315,6 +330,24 @@ public sealed class JobLedgerTests : IDisposable
         var pending = ledger.PendingReconcile(10, 3, now, TimeSpan.FromMinutes(10));
 
         Assert.Equal("crashed", Assert.Single(pending).Hash);
+    }
+
+    [Fact]
+    public void ADuplicateAttemptDoesNotKeepAStaleInFlightJobLookingLive()
+    {
+        // UpdatedAt is the in-flight clock. A second press of Print must be audited, but it
+        // must not make a job that died between claim and answer look fresh forever.
+        var now = DateTimeOffset.Now;
+        var ledger = LedgerWith(("crashed", "InFlight", now.AddMinutes(-11), 0));
+        var before = ledger.Get("crashed")!;
+
+        ledger.RecordDuplicateAttempt("crashed", "crashed-copy");
+
+        var after = ledger.Get("crashed")!;
+        Assert.Equal(before.UpdatedAt, after.UpdatedAt);
+        Assert.Equal(1, after.DuplicateAttemptCount);
+        Assert.Equal("crashed", Assert.Single(
+            ledger.PendingReconcile(10, 3, now, TimeSpan.FromMinutes(10))).Hash);
     }
 
     [Fact]

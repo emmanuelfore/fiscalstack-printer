@@ -4,6 +4,12 @@
 #
 # Run PowerShell as Administrator. This script is exercised on Windows only;
 # it is not runnable on the Linux build host (see packaging/README.md).
+#
+# Register the API key after installing, interactively and without putting it on
+# any command line:
+#   .\publish\PrintInterceptor.exe --register-key
+# or open Settings in the tray app. -ApiKey is deprecated: it writes the key to
+# the machine environment (registry-readable) and is kept only for compatibility.
 #Requires -RunAsAdministrator
 
 [CmdletBinding()]
@@ -23,6 +29,7 @@ param(
 
     [string]$ConfigPath = "",
     [string]$ApiEndpoint = "",
+    # Deprecated: use "PrintInterceptor.exe --register-key" or the tray Settings.
     [string]$ApiKey = "",
     [string]$GhostscriptPath = "",
     [string]$ReceiptPrinter = "",
@@ -41,7 +48,16 @@ $runKeyPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"
 $runValueName = "PrintInterceptorTray"
 $defaultRoot = Join-Path $env:ProgramData "FiscalStack\PrintInterceptor"
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-    $ConfigPath = Join-Path $defaultRoot "config.json"
+    # The updater runs the setup silently without a wizard page for this value,
+    # so it passes the till's configured path through the process environment.
+    # The application resolves the same variable at runtime.
+    $fromEnvironment = [Environment]::GetEnvironmentVariable("PRINTINTERCEPTOR_CONFIG")
+    if ([string]::IsNullOrWhiteSpace($fromEnvironment)) {
+        $ConfigPath = Join-Path $defaultRoot "config.json"
+    }
+    else {
+        $ConfigPath = $fromEnvironment
+    }
 }
 # The service and the Run key start the exe with its own working directory, so a
 # relative path here would resolve against System32. Always store it absolute.
@@ -70,21 +86,43 @@ function Set-RestrictedAcl([string]$path, [string]$user) {
         New-Item -ItemType Directory -Path $path -Force | Out-Null
     }
 
-    # Well-known SIDs keep this working on non-English Windows.
-    $grants = @(
-        "*S-1-5-32-544:(OI)(CI)F",   # Administrators
-        "*S-1-5-18:(OI)(CI)F"        # SYSTEM
-    )
-    if (-not [string]::IsNullOrWhiteSpace($user)) {
-        # ${} because "$user:(OI)..." would parse as a drive-qualified variable
-        # reference and a parse error here stops the whole script from running - it
-        # did, silently, from inside the setup .exe.
-        $grants += "${user}:(OI)(CI)F"
+    # icacls /T applies the same ACE to directories *and* files. (OI)(CI) is
+    # only valid on a directory: passing it to a file makes icacls fail that
+    # file, and because /inheritance:r has already removed its inherited ACEs
+    # the file ends up with an empty DACL that even Administrators cannot read.
+    # Apply the right flags per object instead.
+    $targets = @(Get-Item -LiteralPath $path -Force)
+    if ($targets[0].PSIsContainer) {
+        $targets += @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction Stop)
     }
+    $targets = @($targets | Sort-Object { $_.FullName.Length })
 
-    & icacls.exe $path /inheritance:r /grant:r @grants /T | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not restrict access to $path (icacls exit $LASTEXITCODE)."
+    foreach ($target in $targets) {
+        $flags = if ($target.PSIsContainer) { "(OI)(CI)" } else { "" }
+
+        # Well-known SIDs keep this working on non-English Windows.
+        $grants = @(
+            "*S-1-5-32-544:${flags}F",   # Administrators
+            "*S-1-5-18:${flags}F"        # SYSTEM
+        )
+        if (-not [string]::IsNullOrWhiteSpace($user)) {
+            # ${} because "$user:(OI)..." would parse as a drive-qualified variable
+            # reference and a parse error here stops the whole script from running.
+            $grants += "${user}:${flags}F"
+        }
+
+        # Clear every explicit ACE first, including a tray user left by a previous
+        # install. /grant:r only replaces grants for the trustees named here, so a
+        # Service <- Tray switch would otherwise keep the old user's grant.
+        & icacls.exe $target.FullName /reset | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not reset ACLs at $($target.FullName) (icacls exit $LASTEXITCODE)."
+        }
+
+        & icacls.exe $target.FullName /inheritance:r /grant:r @grants | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not restrict access to $($target.FullName) (icacls exit $LASTEXITCODE)."
+        }
     }
 }
 
@@ -224,6 +262,24 @@ trap {
     exit 1
 }
 
+$aclUser = $null
+if ($RunMode -eq "Tray") {
+    $aclUser = if ([string]::IsNullOrWhiteSpace($TrayUser)) {
+        "$env:USERDOMAIN\$env:USERNAME"
+    }
+    else {
+        $TrayUser
+    }
+}
+
+# Restrict the root before the first config, status or log file is written.
+# Creating it with default permissions first would leave an inherited-ACL window
+# on config.json and the secret store.
+if (-not (Test-Path $defaultRoot)) {
+    New-Item -ItemType Directory -Path $defaultRoot -Force | Out-Null
+}
+Set-RestrictedAcl $defaultRoot $aclUser
+
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path (Split-Path $PSScriptRoot -Parent) "publish\PrintInterceptor.exe"
 }
@@ -282,6 +338,12 @@ if (-not [string]::IsNullOrWhiteSpace($config.storage) -and
     $dataDirectory = $config.storage.dataDirectory
 }
 
+# Config and data folders are restricted before the first byte of either is
+# written, including any custom paths supplied on the command line.
+Set-RestrictedAcl (Split-Path $ConfigPath -Parent) $aclUser
+Set-RestrictedAcl $dataDirectory $aclUser
+Write-Host "Restricted ACLs on the configuration and data folders."
+
 Write-ConfigFile $ConfigPath $config
 Write-Host "Configuration: $ConfigPath"
 
@@ -297,24 +359,13 @@ else {
         "folder ships with PrintInterceptor (source: profiles/ in the repository).")
 }
 
-# Keep the secret out of config.json: the app reads this variable at startup.
+# -ApiKey is kept only for compatibility. The preferred path is --register-key,
+# which reads the key from a hidden prompt and stores it with DPAPI + ACLs.
 if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
+    Write-Warning "-ApiKey writes the key to the machine environment, which any local user can read from the registry. Register it with '$exe --register-key' (hidden prompt) or Settings, then remove the machine variable."
     [Environment]::SetEnvironmentVariable("PRINTINTERCEPTOR_API_KEY", $ApiKey.Trim(), "Machine")
     Write-Host "Stored the API key in the machine environment (PRINTINTERCEPTOR_API_KEY)."
 }
-
-$aclUser = $null
-if ($RunMode -eq "Tray") {
-    $aclUser = if ([string]::IsNullOrWhiteSpace($TrayUser)) {
-        "$env:USERDOMAIN\$env:USERNAME"
-    }
-    else {
-        $TrayUser
-    }
-}
-Set-RestrictedAcl (Split-Path $ConfigPath -Parent) $aclUser
-Set-RestrictedAcl $dataDirectory $aclUser
-Write-Host "Restricted ACLs on the configuration and data folders."
 
 # 2. Virtual printer. This is the step the till cannot capture without, so it is
 #    verified rather than assumed, and it never takes the rest of the install down
@@ -422,6 +473,7 @@ Write-Host "  Virtual printer : $($printerState)$(if ($printerState -eq 'failed'
 Write-Host "  Listen port     : $Port"
 Write-Host "  Configuration   : $ConfigPath"
 Write-Host "  Data and logs   : $dataDirectory"
+Write-Host "Next: register the API key with '$exe --register-key' (hidden prompt) or open Settings in the tray, then restart."
 Write-Host "Open the tray menu and choose 'Fiscal status…' to verify the device and fiscal day."
 
 if ($installFailures.Count -gt 0) {

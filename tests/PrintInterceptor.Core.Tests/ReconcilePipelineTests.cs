@@ -109,6 +109,43 @@ public sealed class ReconcilePipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task AnExhaustedLookupWindowNeverBecomesAMissingReceipt()
+    {
+        // The list is newest first and the walk stopped at scanPages, so "not on these pages"
+        // is not "not on the server". Auto-resend must not turn that into a second receipt.
+        var rig = Harness(_ => InvoiceWindow(pages: 2));
+        rig.Reconcile.ScanPages = 1;
+        rig.Seed("hash-1", "INV-1001", 5.00m, """{"invoiceNumber":"INV-1001"}""");
+
+        var report = await rig.Pipeline.ReconcileAsync(CancellationToken.None);
+
+        Assert.Equal(1, report.StillUnknown);
+        Assert.Equal(0, report.Resent);
+        Assert.Empty(rig.Posts);
+        Assert.Empty(rig.Printer.Models);
+        Assert.Equal(LedgerStatus.AmbiguousFailure, rig.Ledger.Get("hash-1")!.Status);
+    }
+
+    [Fact]
+    public async Task OfflineOriginJobsAreNotPickedUpForOnlineReconciliation()
+    {
+        var rig = Harness();
+        rig.Seed("hash-offline", "INV-OFFLINE", 5.00m,
+            """{"invoiceNumber":"INV-OFFLINE","body":"PRE-OFFLINE"}""");
+        rig.Ledger.MarkFailure("hash-offline", LedgerStatus.AmbiguousFailure,
+            "The signed offline receipt could not be confirmed.", offlineOrigin: true);
+
+        Assert.Empty(rig.Ledger.PendingReconcile(
+            20, int.MaxValue, DateTimeOffset.Now, TimeSpan.FromMinutes(10)));
+
+        var report = await rig.Pipeline.ReconcileAsync(CancellationToken.None, force: true);
+
+        Assert.Equal(0, report.Scanned);
+        Assert.Empty(rig.Posts);
+        Assert.True(rig.Ledger.Get("hash-offline")!.OfflineOrigin);
+    }
+
+    [Fact]
     public async Task NothingIsReSentWithoutTheBodyThatWentOutTheFirstTime()
     {
         var rig = Harness(retainJobs: false);
@@ -255,6 +292,13 @@ public sealed class ReconcilePipelineTests : IDisposable
         StubHttpServer.Json(200,
             $$"""
               {"data":[{{string.Join(",", rows)}}],"total":{{rows.Length}},"pages":1,"page":1,"limit":100}
+              """);
+
+    /// <summary>A list with more pages than the pass reads: the walk ends without proving absence.</summary>
+    private static StubResponse InvoiceWindow(int pages) =>
+        StubHttpServer.Json(200,
+            $$"""
+              {"data":[{{InvoiceRow("INV-1000", "9.00")}}],"total":{{pages}},"pages":{{pages}},"page":1,"limit":100}
               """);
 
     private static string InvoiceRow(string invoiceNumber, string total) =>

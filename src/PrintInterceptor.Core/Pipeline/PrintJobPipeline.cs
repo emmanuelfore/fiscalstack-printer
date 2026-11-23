@@ -57,6 +57,11 @@ public sealed class PrintJobPipeline : IJobProcessor
         _offlineSync = offlineSync;
         _log = log;
         _parser = new ReceiptParser(config.Parse);
+
+        // Recovery can only distinguish a committed signed receipt from an
+        // abandoned signing attempt once the chain is readable.
+        _offlineQueue.ChainProvider = () => _offline.Chain.Current;
+        _offlineQueue.RecoverPending();
     }
 
     public async Task ProcessAsync(PrintJob job, CancellationToken cancellationToken)
@@ -396,10 +401,11 @@ public sealed class PrintJobPipeline : IJobProcessor
                 continue;
             }
 
-            if (first == Adoption.Failed)
+            if (first is Adoption.Failed or Adoption.Unverified)
             {
-                // A list that could not be read says nothing about whether the receipt exists.
-                // Resending on that answer is how a duplicate is created.
+                // A list that could not be read, or a walk that stopped early, says nothing
+                // about whether the receipt exists. Resending on either answer is how a
+                // duplicate is created; both stay blocked for the operator.
                 unknown++;
                 continue;
             }
@@ -504,7 +510,10 @@ public sealed class PrintJobPipeline : IJobProcessor
         NotFound,
         Adopted,
         Failed,
-        Mismatched
+        Mismatched,
+
+        /// <summary>The list read stopped before its end: absence was not proved.</summary>
+        Unverified
     }
 
     /// <summary>
@@ -527,9 +536,14 @@ public sealed class PrintJobPipeline : IJobProcessor
         {
             if (lookup.WindowExhausted)
             {
+                // "Not in the pages we read" is not "not on the server". Reporting it as
+                // NotFound would hand the job to auto-resend and could create a second
+                // ZIMRA receipt. Leave it blocked for the operator instead.
                 _log.Warn(
                     $"The invoice walk for [{Short(entry.Hash)}] stopped after {lookup.PagesRead} page(s) " +
-                    $"(reconcile.scanPages). A receipt older than that window is not found here.");
+                    "(reconcile.scanPages) without reaching the end of the list. The receipt may still " +
+                    "exist outside the window; it is held for operator review and was NOT re-sent.");
+                return Adoption.Unverified;
             }
 
             return Adoption.NotFound;
@@ -606,9 +620,51 @@ public sealed class PrintJobPipeline : IJobProcessor
         string? originalJobPath,
         CancellationToken cancellationToken)
     {
-        if (!_offline.TryIssue(receipt, out var signed, out var error))
+        OfflineQueueItem? item = null;
+        string? recoveryPath = null;
+
+        // Protect the exact signed receipt before the chain spends its counter. If the chain
+        // write or the signing callback fails, the recovery record is discarded and the
+        // counter stays available; if it commits and we crash before the FIFO move, startup
+        // recovery promotes it because the committed chain now owns that global number.
+        var issued = _offline.TryIssue(
+            receipt,
+            out var signed,
+            out var error,
+            beforeCommit: s =>
+            {
+                item = new OfflineQueueItem
+                {
+                    JobHash = hash,
+                    CreatedAt = DateTimeOffset.Now,
+                    Request = _offline.PrepareSyncRequest(request, s),
+                    Signature = s.Signature,
+                    SignedHash = s.Hash,
+                    VerificationCode = s.VerificationCode,
+                    QrCodeUrl = s.QrCodeUrl,
+                    ReceiptDate = s.ReceiptDate,
+                    ReceiptCounter = s.ReceiptCounter,
+                    ReceiptGlobalNo = s.ReceiptGlobalNo,
+                    FiscalDayNo = s.FiscalDayNo,
+                    ReceiptTotal = s.ReceiptTotal
+                };
+
+                if (!_offlineQueue.TrySaveRecovery(item, out recoveryPath, out var protectError))
+                {
+                    return (false, $"Could not protect the signed receipt before spending its counter: {protectError}");
+                }
+
+                return (true, "");
+            });
+
+        if (!issued)
         {
-            var reason = $"The API is offline and offline signing is not available: {error}";
+            if (recoveryPath is not null)
+            {
+                _offlineQueue.DiscardRecovery(recoveryPath);
+            }
+
+            var reason = $"Offline fiscalisation could not be completed: {error}";
             if (!string.IsNullOrWhiteSpace(syncError))
             {
                 reason += $" (Previous sync stopped: {syncError})";
@@ -619,27 +675,26 @@ public sealed class PrintJobPipeline : IJobProcessor
             return;
         }
 
-        var item = new OfflineQueueItem
+        if (item is null || recoveryPath is null)
         {
-            JobHash = hash,
-            CreatedAt = DateTimeOffset.Now,
-            Request = _offline.PrepareSyncRequest(request, signed),
-            Signature = signed.Signature,
-            SignedHash = signed.Hash,
-            VerificationCode = signed.VerificationCode,
-            QrCodeUrl = signed.QrCodeUrl,
-            ReceiptDate = signed.ReceiptDate,
-            ReceiptCounter = signed.ReceiptCounter,
-            ReceiptGlobalNo = signed.ReceiptGlobalNo,
-            FiscalDayNo = signed.FiscalDayNo,
-            ReceiptTotal = signed.ReceiptTotal
-        };
+            const string reason = "The offline receipt was signed but its protected copy was not retained.";
+            _log.Error($"Fiscalisation SKIPPED [{Short(hash)}]: {reason}");
+            _ledger.MarkFailure(hash, LedgerStatus.NeedsReview, reason, offlineOrigin: true);
+            return;
+        }
 
-        if (!_offlineQueue.TryEnqueue(item, out var queueError))
+        if (!_offlineQueue.PromoteRecovery(recoveryPath, out var queueError))
         {
-            const string prefix = "The offline receipt was signed but could not be queued, so it was not printed.";
+            // The counter is already spent, so the signed receipt stays in protected recovery
+            // and is promoted at startup or before the next sync. Never reprint this sale.
+            var prefix =
+                $"The offline receipt (global {signed.ReceiptGlobalNo}, counter {signed.ReceiptCounter}, " +
+                $"hash {Short(signed.Hash)}) " +
+                "was signed and its counter was spent, but it could not be moved into the sync queue. " +
+                "It remains in protected recovery and will be queued at restart; do not reprint this sale.";
             _log.Error($"Fiscalisation SKIPPED [{Short(hash)}]: {prefix} {queueError}");
-            _ledger.MarkFailure(hash, LedgerStatus.NeedsReview, $"{prefix} {queueError}");
+            _ledger.MarkFailure(
+                hash, LedgerStatus.NeedsReview, $"{prefix} {queueError}", offlineOrigin: true);
             return;
         }
 
@@ -931,7 +986,7 @@ public sealed class PrintJobPipeline : IJobProcessor
         };
     }
 
-    private bool IsTaxInclusive => string.Equals(_config.Parse.VatFlag.Trim(), "1", StringComparison.Ordinal);
+    private bool IsTaxInclusive => _config.Parse.VatInclusive;
 
     private PrintFormat ResolvePrintFormat(JobFormat jobFormat) =>
         _config.Printing.Format.Trim().ToLowerInvariant() switch

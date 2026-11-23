@@ -30,6 +30,7 @@ public static class Program
         var explicitTray = args.Contains("--tray", StringComparer.OrdinalIgnoreCase);
         var explicitService = args.Contains("--service", StringComparer.OrdinalIgnoreCase);
         var configureOnly = args.Contains("--configure-only", StringComparer.OrdinalIgnoreCase);
+        var statusRequested = args.Contains("--status", StringComparer.OrdinalIgnoreCase);
         var dayReportRequested = DayReportRequested(args);
         var asWindowsService = WindowsServiceHelpers.IsWindowsService();
         var initialSetup = args.Contains("--setup", StringComparer.OrdinalIgnoreCase);
@@ -39,7 +40,8 @@ public static class Program
         // double-click on the exe or the post-install launch shows no terminal.
         var needsConsole =
             !asWindowsService &&
-            (registerKey || clearKey || explicitConsole || dayReportRequested || (explicitService && !configureOnly));
+            (registerKey || clearKey || explicitConsole || statusRequested || dayReportRequested ||
+             (explicitService && !configureOnly));
         if (needsConsole && OperatingSystem.IsWindows())
         {
             AttachParentConsoleOrAllocate();
@@ -53,13 +55,14 @@ public static class Program
             !explicitService &&
             !registerKey &&
             !clearKey &&
+            !statusRequested &&
             !dayReportRequested &&
             (explicitTray || !explicitConsole);
         var consoleMode =
             !asWindowsService &&
             !configureOnly &&
             !trayMode &&
-            (explicitConsole || needsConsole);
+            (explicitConsole || statusRequested || needsConsole);
 
         var configExisted = File.Exists(configPath);
 
@@ -74,11 +77,19 @@ public static class Program
             return 1;
         }
 
+        // Read-only automation probe. It must not need an API key, open a tray,
+        // start the listener or write a log line: the updater polls it from a
+        // SYSTEM scheduled task and relies on stdout being pure JSON.
+        if (statusRequested)
+        {
+            return PrintStatus(config, args);
+        }
+
         var log = new FileLog(Path.Combine(config.ResolveDataDirectory(), "logs"), consoleMode || trayMode);
 
         if (!configExisted)
         {
-            log.Warn($"Created a default configuration at {configPath}. Register the API key and set the printing options, then restart.");
+            log.Warn($"Created a default configuration at {configPath}. Register the API key with --register-key (or Settings) and set the printing options, then restart.");
         }
 
         var secrets = new SecretStore(config.ResolveSecretDirectory(), log);
@@ -109,7 +120,8 @@ public static class Program
 
         if (!resolution.Found)
         {
-            log.Warn("No API key is configured. Jobs will be held for review until one is registered on this till.");
+            log.Warn("No API key is configured. Register it with --register-key (or open Settings in the tray); " +
+                     "jobs will be held for review until then.");
         }
         else
         {
@@ -274,6 +286,221 @@ public static class Program
         return 0;
     }
 
+    private const string StatusFlag = "--status";
+
+    /// <summary>
+    /// Machine-readable snapshot for the updater and support tools. Only local
+    /// state is inspected: no API call is made and no log file is created, so a
+    /// till with a dead gateway can still report why it must not be upgraded yet.
+    /// </summary>
+    private static int PrintStatus(InterceptorConfig config, string[] args)
+    {
+        var stateDirectory = Path.Combine(config.ResolveDataDirectory(), "state");
+        var serviceName = ResolveServiceName(args);
+        var serviceState = QueryServiceState(serviceName, out var serviceInstalled);
+        var listenerReady = IsListenerReady(config);
+        var pendingOffline = CountJsonFiles(Path.Combine(stateDirectory, "offline-queue"));
+        var recoveryPending = CountJsonFiles(Path.Combine(stateDirectory, "offline-recovery"));
+        var offlinePaused = File.Exists(Path.Combine(stateDirectory, "offline-sync-pause.json"));
+        var (staleInFlight, attentionRequired, ledgerError) = ReadLedgerStatus(stateDirectory);
+
+        var runMode = serviceInstalled ? "service" : "tray-or-console";
+        var healthy =
+            listenerReady &&
+            pendingOffline == 0 &&
+            recoveryPending == 0 &&
+            !offlinePaused &&
+            staleInFlight == 0 &&
+            attentionRequired == 0 &&
+            ledgerError is null &&
+            (!serviceInstalled || string.Equals(serviceState, "RUNNING", StringComparison.OrdinalIgnoreCase));
+
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0.0";
+        var payload = new
+        {
+            Version = version,
+            ServiceName = serviceName,
+            ServiceInstalled = serviceInstalled,
+            ServiceState = serviceState,
+            RunMode = runMode,
+            ListenerReady = listenerReady,
+            PendingOffline = pendingOffline,
+            RecoveryPending = recoveryPending,
+            OfflinePaused = offlinePaused,
+            StaleInFlight = staleInFlight,
+            AttentionRequired = attentionRequired,
+            LedgerError = ledgerError,
+            Healthy = healthy,
+            ConfigPath = config.ConfigPath,
+            DataDirectory = config.ResolveDataDirectory(),
+            GeneratedAt = DateTimeOffset.Now
+        };
+
+        var options = new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            WriteIndented = true
+        };
+        Console.Out.Write(System.Text.Json.JsonSerializer.Serialize(payload, options));
+        return 0;
+    }
+
+    private static string ResolveServiceName(string[] args)
+    {
+        const string prefix = "--service-name=";
+        var value = args.FirstOrDefault(argument =>
+            argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..];
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "PrintInterceptor";
+        }
+
+        // The value is passed to sc.exe. Allow only characters that are legal in a
+        // Windows service name, so a status caller cannot inject command arguments.
+        return value.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.')
+            ? value
+            : "PrintInterceptor";
+    }
+
+    private static string QueryServiceState(string serviceName, out bool installed)
+    {
+        installed = false;
+        if (!OperatingSystem.IsWindows())
+        {
+            return "NOT_WINDOWS";
+        }
+
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo("sc.exe", $"query \"{serviceName}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var process = System.Diagnostics.Process.Start(startInfo);
+            if (process is null)
+            {
+                return "UNKNOWN";
+            }
+
+            var output = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit(3000);
+            if (process.ExitCode != 0)
+            {
+                return "NOT_INSTALLED";
+            }
+
+            installed = true;
+            foreach (var line in output.Split('\n'))
+            {
+                if (line.IndexOf("STATE", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+
+                var separator = line.IndexOf(':');
+                if (separator >= 0)
+                {
+                    var state = line[(separator + 1)..].Trim();
+                    return string.IsNullOrEmpty(state) ? "UNKNOWN" : state.ToUpperInvariant();
+                }
+            }
+
+            return "UNKNOWN";
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return "UNKNOWN";
+        }
+    }
+
+    private static bool IsListenerReady(InterceptorConfig config)
+    {
+        try
+        {
+            foreach (var listener in System.Net.NetworkInformation.IPGlobalProperties
+                         .GetIPGlobalProperties().GetActiveTcpListeners())
+            {
+                if (listener.Port != config.ListenPort)
+                {
+                    continue;
+                }
+
+                var wildcard = listener.Address.Equals(System.Net.IPAddress.Any) ||
+                               listener.Address.Equals(System.Net.IPAddress.IPv6Any);
+                if (!wildcard &&
+                    System.Net.IPAddress.IsLoopback(listener.Address) !=
+                    System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(config.ListenAddress)))
+                {
+                    continue;
+                }
+
+                if (wildcard ||
+                    string.Equals(listener.Address.ToString(), config.ListenAddress, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is System.Net.NetworkInformation.NetworkInformationException or
+                                       FormatException or InvalidOperationException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static int CountJsonFiles(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json").Count() : 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return -1;
+        }
+    }
+
+    private static (int StaleInFlight, int AttentionRequired, string? Error) ReadLedgerStatus(string stateDirectory)
+    {
+        try
+        {
+            var ledger = new JobLedger(stateDirectory, NullLog.Instance);
+            var staleAfter = TimeSpan.FromMinutes(10);
+            var now = DateTimeOffset.Now;
+            var stale = 0;
+            var attention = 0;
+
+            foreach (var entry in ledger.All())
+            {
+                switch (entry.Status)
+                {
+                    case LedgerStatus.InFlight:
+                        attention++;
+                        if (now - entry.UpdatedAt > staleAfter) stale++;
+                        break;
+                    case LedgerStatus.Rejected:
+                    case LedgerStatus.NeedsReview:
+                    case LedgerStatus.AmbiguousFailure:
+                        attention++;
+                        break;
+                }
+            }
+
+            return (stale, attention, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return (-1, -1, ex.Message);
+        }
+    }
+
     private static void WriteStartupError(Exception ex, string configPath, bool trayMode)
     {
         var message = $"Could not load configuration from {configPath}: {ex.Message}";
@@ -370,7 +597,7 @@ public static class Program
     {
         if (!SecretStore.Supported || string.IsNullOrWhiteSpace(resolution.Key))
         {
-            log.Warn("The API key is stored in the configuration file; move it to the secret store.");
+            log.Warn("The API key is stored in the configuration file; register it with --register-key (or save from Settings).");
             return;
         }
 
@@ -388,11 +615,11 @@ public static class Program
 
     private static string DescribeResolution(ApiKeyResolution resolution) => resolution.Origin switch
     {
-        ApiKeyOrigin.Store => $"registered on this till at {SecretStore.Describe(resolution.Key)}, {resolution.Detail}",
+        ApiKeyOrigin.Store => $"registered on this till at {resolution.Detail}, {SecretStore.Describe(resolution.Key)} (preferred)",
         ApiKeyOrigin.Environment => $"environment variable {resolution.Detail}, {SecretStore.Describe(resolution.Key)} " +
-                                    "(registry-readable; prefer --register-key)",
+                                    "(registry-readable; register with --register-key or Settings instead)",
         ApiKeyOrigin.ConfigurationFile => $"configuration file {resolution.Detail}, {SecretStore.Describe(resolution.Key)} " +
-                                          "(plaintext; move it to the secret store)",
+                                          "(plaintext; register with --register-key or save from Settings)",
         _ => "not configured"
     };
 
