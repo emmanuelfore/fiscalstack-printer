@@ -190,32 +190,9 @@ public sealed class PrintJobPipeline : IJobProcessor
                       ?? _ledger.FindByInvoice(
                           receipt.InvoiceNumber, receipt.BusinessDateKey, receipt.TransactionType);
 
-        // The record this job belongs to, so a document held for review is not entered twice
-        // either. Decided before the retry is announced, because a held document never goes to
-        // the gateway and must not be logged as though it did.
-        var record = retried?.Hash ?? hash;
-
-        // The gateway fiscalises the day that is open, so a slip carrying an older date cannot
-        // become a receipt for the day it is sent: it comes back as a validation error that looks
-        // like a broken till. Holding it here names the real problem, costs no request, and never
-        // quietly turns a sale printed on 22 October into a receipt dated today.
-        if (receipt.Date is { } printedOn && printedOn.Date != DateTimeOffset.Now.Date)
-        {
-            var stale =
-                $"The document is dated {printedOn:dd/MM/yyyy} but the fiscal day open today is " +
-                $"{DateTimeOffset.Now:dd/MM/yyyy}, so it was held rather than sent. ZIMRA only accepts the " +
-                "currently-open day: print it on the day of sale, or fix the date the POS writes on the slip.";
-            _log.Warn($"Held for review [{Short(record)}]: {stale}");
-            _ledger.RecordNeedsReview(
-                record,
-                receipt.InvoiceNumber,
-                receipt.BusinessDateKey,
-                stale,
-                sourceFile,
-                reviewStage: "Document date",
-                reviewHint: "Print the sale on the current fiscal day or correct the POS date, then print it again.");
-            return;
-        }
+        // The document date is sent as printed. The gateway owns the rule for which fiscal
+        // day it will accept, so an older slip is no longer held by the till; its own
+        // validation response is the authoritative answer.
 
         if (retried is not null)
         {

@@ -172,26 +172,28 @@ public sealed class DuplicatePrintTests : IDisposable
     }
 
     [Fact]
-    public async Task ASlipDatedBeforeTodayIsHeldAndCostsNoRequest()
+    public async Task ASlipDatedBeforeTodayIsSentWithItsPrintedDate()
     {
-        // ZIMRA fiscalises the day that is open, so yesterday's slip cannot become today's receipt.
-        // Holding it says so in the operator's own words instead of paying a validation error.
+        // The gateway decides which fiscal day it accepts. The till sends the date the POS
+        // printed instead of holding the sale locally on an operator-side calendar rule.
         var rig = Harness(FiscalisedEveryTime);
-        var lastWeek = DateTimeOffset.Now.AddDays(-7).ToString("dd/MM/yyyy");
+        var printedDate = DateTimeOffset.Now.AddDays(-7);
+        var lastWeek = printedDate.ToString("dd/MM/yyyy");
 
         await rig.SendAsync(Sale(on: lastWeek));
 
-        Assert.Empty(rig.Posts);
-        Assert.Empty(rig.Printer.Models);
+        var post = Assert.Single(rig.Posts);
+        Assert.Contains(printedDate.ToString("yyyy-MM-dd"), post.Body, StringComparison.Ordinal);
+        Assert.Single(rig.Printer.Models);
 
         var entry = Assert.Single(rig.Ledger.All());
-        Assert.Equal(LedgerStatus.NeedsReview, entry.Status);
-        Assert.Contains("held rather than sent", entry.Error ?? "");
-        Assert.Contains(lastWeek, entry.Error ?? "");
+        Assert.Equal(LedgerStatus.Fiscalised, entry.Status);
+        Assert.Equal(lastWeek, DateTime.ParseExact(entry.BusinessDate, "yyyyMMdd",
+            System.Globalization.CultureInfo.InvariantCulture).ToString("dd/MM/yyyy"));
     }
 
     [Fact]
-    public async Task ARepeatOfAHeldSlipStaysOnTheOneRecord()
+    public async Task ARepeatOfAnOlderSlipStaysOnTheOneRecord()
     {
         var rig = Harness(FiscalisedEveryTime);
         var lastWeek = DateTimeOffset.Now.AddDays(-7).ToString("dd/MM/yyyy");
@@ -199,11 +201,13 @@ public sealed class DuplicatePrintTests : IDisposable
         await rig.SendAsync(Sale(on: lastWeek));
         await rig.SendAsync(Sale(on: lastWeek, footer: "Duplicate copy."));
 
-        Assert.Empty(rig.Posts);
-        Assert.Empty(rig.Printer.Models);
+        Assert.Single(rig.Posts);
+        Assert.Equal(2, rig.Printer.Models.Count);
+        Assert.True(rig.Printer.Models[1].IsReprint);
 
         var entry = Assert.Single(rig.Ledger.All());
-        Assert.Equal(LedgerStatus.NeedsReview, entry.Status);
+        Assert.Equal(LedgerStatus.Fiscalised, entry.Status);
+        Assert.Equal(1, entry.DuplicateAttemptCount);
     }
 
     [Fact]

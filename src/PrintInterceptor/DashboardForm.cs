@@ -114,7 +114,7 @@ public sealed class DashboardForm : Form
         _actions = actions;
         _server = server;
 
-        Text = "PrintInterceptor — Operator console";
+        Text = "FiscalStack — Operator console";
         UiTheme.UseAppIcon(this);
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1240, 760);
@@ -500,11 +500,9 @@ public sealed class DashboardForm : Form
         var logo = UiTheme.BrandLogo(190, 42);
         logo.Location = new Point(10, 6);
         var caption = new Panel { Location = new Point(12, 52), Size = new Size(190, 26) };
-        var mark = UiTheme.BrandMark(18);
-        mark.Dock = DockStyle.Left;
         var subtitle = new Label
         {
-            Text = "PrintInterceptor console",
+            Text = "FiscalStack console",
             Dock = DockStyle.Fill,
             Font = UiTheme.Ui(8.5f),
             ForeColor = Color.FromArgb(148, 163, 184),
@@ -512,7 +510,6 @@ public sealed class DashboardForm : Form
             Padding = new Padding(8, 0, 0, 0)
         };
         caption.Controls.Add(subtitle);
-        caption.Controls.Add(mark);
         brand.Controls.Add(caption);
         brand.Controls.Add(logo);
 

@@ -127,15 +127,6 @@ internal static class UiTheme
         }
     }
 
-    /// <summary>The compact symbol beside the console title; the full wordmark is used in the rail.</summary>
-    public static PictureBox BrandMark(int size) => new()
-    {
-        Image = TryBrandMarkImage(size),
-        Size = new Size(size, size),
-        SizeMode = PictureBoxSizeMode.Zoom,
-        BackColor = Color.Transparent
-    };
-
     /// <summary>Operator-supplied FiscalStack logo, contained without cropping or a grey box.</summary>
     public static PictureBox BrandLogo(int width, int height)
     {

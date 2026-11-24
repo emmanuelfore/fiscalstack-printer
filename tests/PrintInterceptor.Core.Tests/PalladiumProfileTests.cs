@@ -62,7 +62,7 @@ public sealed class PalladiumProfileTests
         var receipt = Assert.IsType<ParsedReceipt>(result.Receipt);
         Assert.Equal("IN-000000027", receipt.InvoiceNumber);
         Assert.Equal(new DateTime(2026, 10, 16), receipt.Date!.Value.Date);
-        Assert.Equal("USD", receipt.Currency);
+        Assert.Equal("ZWG", receipt.Currency);
         Assert.Equal("Sample Inv", receipt.Buyer.Name);
         Assert.Single(receipt.Items);
         Assert.StartsWith("VOL018BLU", receipt.Items[0].Name);

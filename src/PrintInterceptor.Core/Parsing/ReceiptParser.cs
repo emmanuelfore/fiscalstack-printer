@@ -1311,9 +1311,22 @@ public sealed class ReceiptParser
     {
         var currencies = _config.Currencies ?? ParseConfig.DefaultCurrencies();
 
-        // A labelled currency wins over a loose keyword elsewhere on the page. A4
-        // Palladium invoices print "Account Type : ZWG" before "Invoiced Currency:
-        // USD", so scanning the whole page would file a USD sale as ZWG.
+        // A ZWG/ZWL marker anywhere on a Palladium invoice is authoritative. Those
+        // forms print both an account currency and an "Invoiced Currency" line, and
+        // the till must not file a ZWG sale as USD because a label says otherwise.
+        var zwgKeywords = currencies
+            .Where(currency => string.Equals(NormalizeCurrency(currency.Name), "ZWG", StringComparison.Ordinal))
+            .Select(currency => currency.Keyword)
+            .Where(keyword => !string.IsNullOrWhiteSpace(keyword))
+            .ToList();
+        if (lines.Any(line => zwgKeywords.Any(keyword =>
+                line.Contains(keyword, StringComparison.OrdinalIgnoreCase))))
+        {
+            return "ZWG";
+        }
+
+        // Without a ZWG marker, an explicit currency label beats an incidental
+        // currency keyword elsewhere on the page.
         foreach (var line in lines)
         {
             foreach (var label in CurrencyLabels)

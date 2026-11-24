@@ -857,6 +857,12 @@ validation error that rejects the whole sale.
 | `buyer` | Only when a TIN of exactly 10 digits was printed | Left off entirely — ZIMRA receives a buyer against a TIN, and a name-only block is rejected. A VAT number that is not 9 digits, an email the gateway cannot parse, or a phone over 20 characters is dropped on its own |
 | `invoiceNumber` | Always, when the POS printed one, so a blind retry returns `409 DUPLICATE_INVOICE` instead of minting a second receipt | Omitted when no number was printed; the gateway generates one |
 
+A `ZWG` or `ZWL` marker anywhere on the receipt wins, even when a separate `Invoiced Currency`
+line prints `USD`; a slip the POS prints in ZiG must not be filed as dollars. Without such a
+marker, an explicit currency label wins over a loose keyword elsewhere on the page. The printed
+date is sent as printed: the gateway owns the rule for which fiscal day it accepts, and its
+validation response is authoritative.
+
 A rejection is reported with the gateway's error code, its per-field complaints and its hint,
 so `Rejected` in the jobs list says which line to fix (`VALIDATION_ERROR: Invalid request
 body [paymentMethod: Invalid enum value. Expected 'CASH' | 'CARD' | 'MOBILE' | 'TRANSFER', received 'PayNow'] — …`).
