@@ -90,6 +90,29 @@ public sealed class PrintJobServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Enqueues a job captured outside the TCP listener. Watchers use this instead of
+    /// calling the pipeline directly so operator pause, the bounded queue, shutdown
+    /// drain and every fiscal safety check stay on one path.
+    /// </summary>
+    public async ValueTask EnqueueAsync(PrintJob job, CancellationToken cancellationToken = default)
+    {
+        if (job.Data.Length == 0)
+        {
+            _log.Warn($"Ignoring empty print job from {job.RemoteEndPoint}");
+            return;
+        }
+
+        if (job.Data.Length > _config.MaxJobBytes)
+        {
+            _log.Error($"Rejecting print job from {job.RemoteEndPoint}: {job.Data.Length} bytes exceeds maxJobBytes.");
+            return;
+        }
+
+        _log.Info($"Captured {job.Data.Length} bytes from {job.RemoteEndPoint}");
+        await _queue.Writer.WriteAsync(job, cancellationToken);
+    }
+
     private static TaskCompletionSource CompletedGate()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -249,20 +272,7 @@ public sealed class PrintJobServer : IAsyncDisposable
                     return;
                 }
 
-                if (data.Length == 0)
-                {
-                    _log.Warn($"Ignoring empty print job from {remote}");
-                    return;
-                }
-
-                if (data.Length > _config.MaxJobBytes)
-                {
-                    _log.Error($"Rejecting print job from {remote}: {data.Length} bytes exceeds maxJobBytes.");
-                    return;
-                }
-
-                _log.Info($"Captured {data.Length} bytes from {remote}");
-                await _queue.Writer.WriteAsync(new PrintJob(data, remote, DateTimeOffset.Now), cancellationToken);
+                await EnqueueAsync(new PrintJob(data, remote, DateTimeOffset.Now), cancellationToken);
             }
         }
         catch (OperationCanceledException)

@@ -223,6 +223,7 @@ public static class Program
             services.AddSingleton<IJobProcessor>(serviceProvider =>
                 serviceProvider.GetRequiredService<PrintJobPipeline>());
             services.AddSingleton<PrintJobServer>();
+            services.AddSingleton<WatchedPdfService>();
             if (!configureOnly)
             {
                 services.AddHostedService<PrintInterceptorHostedService>();

@@ -141,6 +141,13 @@
     "retentionDays": 30
   },
 
+  "//capture": "Some browsers turn a PDF into outlines when printing through a PostScript driver, leaving no text for the parser. Save the original PDF into pdfWatchDirectory instead: once the file stops changing, its bytes enter the same capture queue as the virtual printer, so pause, duplicate checks and fiscal safety are unchanged. Processed files move to a 'processed' subfolder; bad files move to 'rejected'. The default folder is data/drop.",
+  "capture": {
+    "enabled": true,
+    "pdfWatchDirectory": "",
+    "stabilityMilliseconds": 1500
+  },
+
   "offline": {
     "enabled": false
   },

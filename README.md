@@ -107,6 +107,19 @@ This creates the raw TCP port `FiscalStack_Raw_9100` and the printer
   till printer.
 - Remove it with `.\addprinter.ps1 -Remove`.
 
+### PDF drop folder
+
+Some browser/PDF viewers print a PDF as outlines or an image through the PostScript driver,
+which removes the text layer the parser needs. In that workflow, save the original PDF into:
+
+```
+%ProgramData%\FiscalStack\PrintInterceptor\data\drop
+```
+
+The app waits until the file stops changing, then feeds the original bytes into the same
+capture queue as the virtual printer. Processed files move to `drop\processed`; invalid files
+move to `drop\rejected`. The folder and timing are configurable with `capture.*`.
+
 ## 2. Configure
 
 The service creates a default config on first run:
@@ -134,6 +147,7 @@ most:
 | `parse.*` | The layout rules for this POS: markers, labels, keywords, date formats, line patterns and tolerances. See [Parsing profiles](#parsing-profiles). |
 | `offline.enabled` | Sign receipts on the till when the API is unreachable. Everything it needs (device, key, taxes, counters) is provisioned from FiscalStack with the API key; see [Offline signing](#offline-signing). |
 | `storage.retentionDays` | How long decoded and raw jobs are kept. The reconcile replay needs this folder; see [Reconciling an unknown receipt](#reconciling-an-unknown-receipt). |
+| `capture.*` | Optional PDF drop folder: `enabled`, `pdfWatchDirectory` (default `data/drop`) and `stabilityMilliseconds`. See [PDF drop folder](#pdf-drop-folder). |
 | `reconcile.*` | How the app resolves a fiscalisation whose answer it could not read. See [Reconciling an unknown receipt](#reconciling-an-unknown-receipt). |
 
 `parse.vatFlag` follows FiscalStack convention: `"1"` means printed prices include VAT,

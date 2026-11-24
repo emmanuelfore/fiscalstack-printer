@@ -10,6 +10,7 @@ namespace PrintInterceptor;
 public sealed class PrintInterceptorHostedService : IHostedService
 {
     private readonly PrintJobServer _server;
+    private readonly WatchedPdfService _watchedPdf;
     private readonly JobStore _jobStore;
     private readonly PrintSnapshotStore _snapshots;
     private readonly OfflineReceiptService _offline;
@@ -19,6 +20,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
 
     public PrintInterceptorHostedService(
         PrintJobServer server,
+        WatchedPdfService watchedPdf,
         JobStore jobStore,
         PrintSnapshotStore snapshots,
         OfflineReceiptService offline,
@@ -27,6 +29,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
         ILog log)
     {
         _server = server;
+        _watchedPdf = watchedPdf;
         _jobStore = jobStore;
         _snapshots = snapshots;
         _offline = offline;
@@ -58,6 +61,7 @@ public sealed class PrintInterceptorHostedService : IHostedService
         }
 
         await _server.StartAsync(cancellationToken);
+        await _watchedPdf.StartAsync(cancellationToken);
 
         // Keep the online fiscalise connection warm so the first receipt after the
         // till idles does not pay a cold TLS handshake before anything prints.
@@ -69,6 +73,9 @@ public sealed class PrintInterceptorHostedService : IHostedService
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _log.Info("PrintInterceptor is stopping.");
+
+        // Stop dropping new files into the capture queue before the server drains it.
+        await _watchedPdf.StopAsync();
         await _server.StopAsync();
     }
 }

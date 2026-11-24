@@ -54,6 +54,7 @@ public sealed class InterceptorConfig
     public PrintingConfig Printing { get; set; } = new();
     public ParseConfig Parse { get; set; } = new();
     public StorageConfig Storage { get; set; } = new();
+    public CaptureConfig Capture { get; set; } = new();
     public OfflineConfig Offline { get; set; } = new();
     public ReconcileConfig Reconcile { get; set; } = new();
     public UpdateConfig Update { get; set; } = new();
@@ -230,6 +231,7 @@ public sealed class InterceptorConfig
         Printing = Printing,
         Parse = Parse,
         Storage = Storage,
+        Capture = Capture,
         Offline = Offline,
         Reconcile = Reconcile,
         ConfigPath = ConfigPath
@@ -287,6 +289,23 @@ public sealed class InterceptorConfig
         if (MaxJobBytes is < 1024 or > 100 * 1024 * 1024)
         {
             errors.Add("maxJobBytes must be between 1 KiB and 100 MiB.");
+        }
+
+        if (Capture.StabilityMilliseconds is < 250 or > 60000)
+        {
+            errors.Add("capture.stabilityMilliseconds must be between 250 and 60000.");
+        }
+
+        if (Capture.Enabled && !string.IsNullOrWhiteSpace(Capture.PdfWatchDirectory))
+        {
+            try
+            {
+                _ = Path.GetFullPath(Capture.PdfWatchDirectory);
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                errors.Add($"capture.pdfWatchDirectory '{Capture.PdfWatchDirectory}' is not a valid path: {ex.Message}");
+            }
         }
 
         if (Printing.PaperWidthMm is < 40 or > 120)
@@ -438,9 +457,21 @@ public sealed class InterceptorConfig
         Printing ??= new PrintingConfig();
         Parse ??= new ParseConfig();
         Storage ??= new StorageConfig();
+        Capture ??= new CaptureConfig();
         Offline ??= new OfflineConfig();
         Reconcile ??= new ReconcileConfig();
         Update ??= new UpdateConfig();
+
+        Capture.PdfWatchDirectory = (Capture.PdfWatchDirectory ?? "").Trim();
+        if (Capture.PdfWatchDirectory.Length == 0)
+        {
+            Capture.PdfWatchDirectory = Path.Combine(ResolveDataDirectory(), "drop");
+        }
+
+        if (Capture.StabilityMilliseconds is < 250 or > 60000)
+        {
+            Capture.StabilityMilliseconds = 1500;
+        }
 
         // Operators paste thumbprints with spaces or colons; the pin itself is the hex.
         Update.SignerThumbprint = new string(
@@ -542,6 +573,19 @@ public sealed class StorageConfig
     public string DataDirectory { get; set; } = "";
     public bool RetainJobs { get; set; } = true;
     public int RetentionDays { get; set; } = 30;
+}
+
+/// <summary>
+/// A PDF drop folder for till workflows that save a fiscal invoice from Palladium
+/// instead of printing it through the PostScript spooler. The original PDF bytes
+/// are fed into the same capture queue as socket jobs, so pause, backpressure,
+/// duplicate identity and all fiscal safety checks stay identical.
+/// </summary>
+public sealed class CaptureConfig
+{
+    public bool Enabled { get; set; } = true;
+    public string PdfWatchDirectory { get; set; } = "";
+    public int StabilityMilliseconds { get; set; } = 1500;
 }
 
 /// <summary>

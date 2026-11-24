@@ -403,6 +403,50 @@ public class InterceptorConfigTests
     }
 
     [Fact]
+    public void TheExampleConfigCarriesTheBuiltInCaptureSettings()
+    {
+        var path = Path.GetFullPath(
+            Path.Combine(AppContext.BaseDirectory, "../../../../../config.example.json"));
+        var example = InterceptorConfig.LoadOrCreate(path).Capture;
+        var builtIn = new CaptureConfig();
+
+        Assert.Equal(builtIn.Enabled, example.Enabled);
+        Assert.Equal(builtIn.StabilityMilliseconds, example.StabilityMilliseconds);
+    }
+
+    [Fact]
+    public void SavePreservesThePdfDropFolderSettings()
+    {
+        var directory = NewTempDirectory();
+        var path = Path.Combine(directory, "config.json");
+
+        try
+        {
+            var config = new InterceptorConfig
+            {
+                ConfigPath = path,
+                Capture = new CaptureConfig
+                {
+                    Enabled = false,
+                    PdfWatchDirectory = directory,
+                    StabilityMilliseconds = 5000
+                }
+            };
+
+            config.Save();
+
+            var reloaded = InterceptorConfig.LoadOrCreate(path);
+            Assert.False(reloaded.Capture.Enabled);
+            Assert.Equal(directory, reloaded.Capture.PdfWatchDirectory);
+            Assert.Equal(5000, reloaded.Capture.StabilityMilliseconds);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void SaveDoesNotPersistOrMutateTheApiKey()
     {
         const string key = "sk_live_do_not_persist_1234567890";
