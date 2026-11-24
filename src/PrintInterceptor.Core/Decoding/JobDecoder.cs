@@ -7,6 +7,13 @@ namespace PrintInterceptor.Core.Decoding;
 
 public sealed class JobDecoder
 {
+    // Windows drivers wrap PostScript/PDF in a PJL envelope. The language marker can
+    // therefore be a few dozen bytes in, after the UEL and @PJL ENTER LANGUAGE lines.
+    private const int PjlScanLimit = 64 * 1024;
+    private static ReadOnlySpan<byte> Uel => "\x1B%-12345X"u8;
+    private static ReadOnlySpan<byte> PdfMarker => "%PDF-"u8;
+    private static ReadOnlySpan<byte> PostScriptMarker => "%!"u8;
+
     private readonly GhostscriptTextExtractor _ghostscript;
     private readonly GhostscriptPdfWriter _pdfWriter;
     private readonly ILog _log;
@@ -20,12 +27,13 @@ public sealed class JobDecoder
 
     public async Task<DecodedJob> DecodeAsync(byte[] data, CancellationToken cancellationToken)
     {
-        var format = DetectFormat(data);
+        var format = DetectFormat(data, out var payloadOffset);
+        var payload = Payload(data, payloadOffset);
 
         if (format is JobFormat.PostScript or JobFormat.Pdf)
         {
             var extension = format == JobFormat.Pdf ? ".pdf" : ".ps";
-            var extracted = await _ghostscript.ExtractTextAsync(data, extension, cancellationToken);
+            var extracted = await _ghostscript.ExtractTextAsync(payload, extension, cancellationToken);
             if (!extracted.Success)
             {
                 _log.Error($"Could not extract text from {format} job: {extracted.Error}");
@@ -44,7 +52,7 @@ public sealed class JobDecoder
             byte[]? pdf = null;
             if (format == JobFormat.PostScript)
             {
-                var converted = await _pdfWriter.ConvertAsync(data, cancellationToken);
+                var converted = await _pdfWriter.ConvertAsync(payload, cancellationToken);
                 if (converted.Success)
                 {
                     pdf = converted.Pdf;
@@ -55,7 +63,7 @@ public sealed class JobDecoder
                 }
             }
 
-            var title = format == JobFormat.PostScript ? ExtractPostScriptTitle(data) : null;
+            var title = format == JobFormat.PostScript ? ExtractPostScriptTitle(payload) : null;
             return new DecodedJob(true, format, text, title, null, pdf);
         }
 
@@ -68,26 +76,99 @@ public sealed class JobDecoder
         return new DecodedJob(true, format, decoded, null, null);
     }
 
-    public static JobFormat DetectFormat(ReadOnlySpan<byte> data)
-    {
-        var offset = 0;
-        while (offset < data.Length && data[offset] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
-        {
-            offset++;
-        }
+    public static JobFormat DetectFormat(ReadOnlySpan<byte> data) => DetectFormat(data, out _);
 
-        if (data[offset..].StartsWith("%PDF"u8))
+    private static JobFormat DetectFormat(ReadOnlySpan<byte> data, out int payloadOffset)
+    {
+        payloadOffset = 0;
+        var offset = SkipWhitespace(data, 0);
+
+        if (data[offset..].StartsWith(PdfMarker))
         {
             return JobFormat.Pdf;
         }
 
-        if (data[offset..].StartsWith("%!"u8))
+        if (data[offset..].StartsWith(PostScriptMarker))
         {
             return JobFormat.PostScript;
         }
 
-        return JobFormat.Text;
+        // A PJL envelope is standard on Windows PostScript queues. Only trust a
+        // marker further into the stream when the bytes before it really are PJL;
+        // a text receipt containing "%!" must stay a text job.
+        var prefix = data[..Math.Min(data.Length, PjlScanLimit)];
+        var pdfIndex = prefix.IndexOf(PdfMarker);
+        var psIndex = prefix.IndexOf(PostScriptMarker);
+
+        int markerIndex;
+        JobFormat format;
+        if (pdfIndex >= 0 && (psIndex < 0 || pdfIndex < psIndex))
+        {
+            markerIndex = pdfIndex;
+            format = JobFormat.Pdf;
+        }
+        else if (psIndex >= 0)
+        {
+            markerIndex = psIndex;
+            format = JobFormat.PostScript;
+        }
+        else
+        {
+            return JobFormat.Text;
+        }
+
+        if (!LooksLikePjl(prefix[..markerIndex]))
+        {
+            return JobFormat.Text;
+        }
+
+        payloadOffset = markerIndex;
+        return format;
     }
+
+    private static byte[] Payload(byte[] data, int offset)
+    {
+        if (offset <= 0)
+        {
+            return data;
+        }
+
+        var payload = data.AsSpan(offset);
+        var end = payload.Length;
+        while (end > 0 && IsWhitespace(payload[end - 1]))
+        {
+            end--;
+        }
+
+        // The PJL universal exit language often trails the document. Ghostscript
+        // would tolerate it, but it does not belong in the archived payload.
+        if (end >= Uel.Length && payload.Slice(end - Uel.Length, Uel.Length).SequenceEqual(Uel))
+        {
+            end -= Uel.Length;
+            while (end > 0 && IsWhitespace(payload[end - 1]))
+            {
+                end--;
+            }
+        }
+
+        return payload[..end].ToArray();
+    }
+
+    private static bool LooksLikePjl(ReadOnlySpan<byte> prefix) =>
+        prefix.IndexOf("@PJL"u8) >= 0 || prefix.IndexOf(Uel) >= 0;
+
+    private static int SkipWhitespace(ReadOnlySpan<byte> data, int offset)
+    {
+        while (offset < data.Length && IsWhitespace(data[offset]))
+        {
+            offset++;
+        }
+
+        return offset;
+    }
+
+    private static bool IsWhitespace(byte value) =>
+        value is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n' or (byte)'\f';
 
     private static string? ExtractPostScriptTitle(byte[] data)
     {

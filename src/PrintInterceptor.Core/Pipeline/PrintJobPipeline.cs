@@ -77,9 +77,29 @@ public sealed class PrintJobPipeline : IJobProcessor
         if (!decoded.Success)
         {
             var archived = _jobStore.SaveUndecodable(job.Data, decoded.Format);
+            var decodeHash = Hashing.Sha256Hex(job.Data);
+            var decodeError = decoded.Error ?? "unknown decode error";
+            var reason = decodeError.Contains("no extractable text", StringComparison.OrdinalIgnoreCase)
+                ? "The print job has no extractable text: the POS driver rendered the invoice as outlines " +
+                  "or an image instead of characters. The parser cannot read amounts from it. Print " +
+                  "through a text-capable driver so the next slip is captured as text. " +
+                  "No receipt was sent to FiscalStack."
+                : $"The captured print job could not be decoded: {decodeError}. " +
+                  "No receipt was sent to FiscalStack.";
+
             _log.Error(
-                $"Print job from {job.RemoteEndPoint} could not be read as text: {decoded.Error}" +
+                $"Print job from {job.RemoteEndPoint} could not be read as text: {decodeError}" +
                 (archived is null ? "" : $" Received file retained at {archived}."));
+            _ledger.RecordNeedsReview(
+                decodeHash,
+                null,
+                DateTimeOffset.Now.ToString("yyyyMMdd"),
+                reason,
+                archived,
+                reviewStage: "Decode",
+                reviewHint: "Ask the POS to print through a text driver (for example Generic / Text Only), " +
+                            "then print the invoice again. This held job was not sent to FiscalStack.",
+                reviewWarnings: Array.Empty<string>());
             return;
         }
 

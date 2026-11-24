@@ -31,4 +31,26 @@ public class TextSanitizerTests
         Assert.Equal(JobFormat.PostScript, JobDecoder.DetectFormat(Encoding.ASCII.GetBytes("\n%!PS-Adobe-3.0")));
         Assert.Equal(JobFormat.Pdf, JobDecoder.DetectFormat(Encoding.ASCII.GetBytes("%PDF-1.4")));
     }
+
+    [Fact]
+    public void DetectsPjlWrappedPostScriptAndPdf()
+    {
+        Assert.Equal(
+            JobFormat.PostScript,
+            JobDecoder.DetectFormat(Encoding.ASCII.GetBytes(
+                "\x1B%-12345X@PJL COMMENT MSxpsPS\r\n@PJL ENTER LANGUAGE=POSTSCRIPT\r\n%!PS-Adobe-3.0")));
+
+        Assert.Equal(
+            JobFormat.Pdf,
+            JobDecoder.DetectFormat(Encoding.ASCII.GetBytes(
+                "\x1B%-12345X@PJL ENTER LANGUAGE=PDF\r\n%PDF-1.4")));
+    }
+
+    [Fact]
+    public void DoesNotTreatAMarkerInPlainTextAsPostScript()
+    {
+        Assert.Equal(
+            JobFormat.Text,
+            JobDecoder.DetectFormat(Encoding.ASCII.GetBytes("Item %! not a language marker")));
+    }
 }

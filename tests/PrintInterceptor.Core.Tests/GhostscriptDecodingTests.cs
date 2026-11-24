@@ -64,6 +64,32 @@ public sealed class GhostscriptDecodingTests : IDisposable
     }
 
     [Fact]
+    public async Task DecodedPjlWrappedPostScriptJobUsesGhostscript()
+    {
+        var config = Config();
+        if (GhostscriptLocator.Resolve(config) is null)
+        {
+            return;
+        }
+
+        var pjlJob =
+            "\x1B%-12345X@PJL COMMENT MSxpsPS\r\n" +
+            "@PJL ENTER LANGUAGE=POSTSCRIPT\r\n" +
+            PostScriptJob +
+            "\r\n\x1B%-12345X";
+
+        var decoded = await new JobDecoder(config, NullLog.Instance)
+            .DecodeAsync(Encoding.ASCII.GetBytes(pjlJob), CancellationToken.None);
+
+        Assert.True(decoded.Success, decoded.Error);
+        Assert.Equal(JobFormat.PostScript, decoded.Format);
+        Assert.Contains("Fiscal Tax Invoice", decoded.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("@PJL", decoded.Text, StringComparison.Ordinal);
+        Assert.NotNull(decoded.Pdf);
+        Assert.Equal("%PDF", Encoding.ASCII.GetString(decoded.Pdf!, 0, 4));
+    }
+
+    [Fact]
     public async Task PdfwriteTurnsAPostScriptJobIntoAPdf()
     {
         var config = Config();
