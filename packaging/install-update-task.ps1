@@ -7,7 +7,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$SignerThumbprint,
-    [string]$ManifestUrl = "https://updates.fiscalstack.co.zw/printinterceptor/update.json",
+    [string]$ManifestUrl = "https://github.com/emmanuelfore/fiscalstack-printer/releases/latest/download/update.json",
     [string]$Channel = "stable",
     [string]$ServiceName = "PrintInterceptor",
     [string]$AppDirectory = "",

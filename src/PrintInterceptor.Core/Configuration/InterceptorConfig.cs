@@ -1425,7 +1425,7 @@ public sealed class ReconcileConfig
 /// </summary>
 public sealed class UpdateConfig
 {
-    public string ManifestUrl { get; set; } = "https://updates.fiscalstack.co.zw/printinterceptor/update.json";
+    public string ManifestUrl { get; set; } = "https://github.com/emmanuelfore/fiscalstack-printer/releases/latest/download/update.json";
 
     /// <summary>SHA1 thumbprint of the Authenticode certificate that signs releases. Empty = checks disabled.</summary>
     public string SignerThumbprint { get; set; } = "";

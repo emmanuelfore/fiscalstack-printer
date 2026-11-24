@@ -156,7 +156,7 @@
 
   "//update": "The tray's Check for updates runs the bundled updater in dry-run mode: it verifies the HTTPS manifest, the SHA256 and the pinned Authenticode signer, and the till's health, but never installs. Leave signerThumbprint empty until the release certificate's 40-hex thumbprint has been pinned here; installing is done by the elevated scheduled task. Spaces and colons in a pasted thumbprint are ignored.",
   "update": {
-    "manifestUrl": "https://updates.fiscalstack.co.zw/printinterceptor/update.json",
+    "manifestUrl": "https://github.com/emmanuelfore/fiscalstack-printer/releases/latest/download/update.json",
     "signerThumbprint": "",
     "channel": "stable"
   }

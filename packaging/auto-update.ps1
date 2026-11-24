@@ -8,7 +8,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$ManifestUrl = "https://updates.fiscalstack.co.zw/printinterceptor/update.json",
+    [string]$ManifestUrl = "https://github.com/emmanuelfore/fiscalstack-printer/releases/latest/download/update.json",
     [Parameter(Mandatory = $true)]
     [string]$SignerThumbprint,
     [string]$Channel = "stable",
