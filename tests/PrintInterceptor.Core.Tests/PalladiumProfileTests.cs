@@ -23,12 +23,14 @@ public sealed class PalladiumProfileTests
         Fiscal Tax Invoice
         Number:IN-000000027
         Date:10/16/2026
+        Account Type :ZWG
         Buyer Details:Bank Details:
-        Customer Name:Sample Inv
-        Customer Address:::, Zimbabwe
+        Customer Name       :Sample Inv                                                                   Account Name        :EXIMIUM PREMIUM BRANDS PVT LTD
+        Customer Address    :::, Zimbabwe                                                                Bank                : CBZ Borrowdale Branch
+        Customer TIN        :                                                                             Account Type        : USD
         TIN: 2002533710  VAT: 220451470
-        LineHS CodeItemDescriptionQuantityUnitVATTotal Inc
-         185434000VOL018BLUV18X-BLUEBERRY 1EA 1.00 0.16 1.00
+        Line      HS Code      Item              Description          Quantity      Unit      Price Inc      VAT      Total Inc
+         1       85434000      VOL018BLU         V18X-BLUEBERRY              1         EA          1.00        0.16          1.00
         Subtotal:USD 1.00
         VAT Total :USD 0.16
         Invoice Total:USD 1.16
@@ -60,8 +62,12 @@ public sealed class PalladiumProfileTests
         var receipt = Assert.IsType<ParsedReceipt>(result.Receipt);
         Assert.Equal("IN-000000027", receipt.InvoiceNumber);
         Assert.Equal(new DateTime(2026, 10, 16), receipt.Date!.Value.Date);
+        Assert.Equal("USD", receipt.Currency);
         Assert.Equal("Sample Inv", receipt.Buyer.Name);
         Assert.Single(receipt.Items);
+        Assert.StartsWith("VOL018BLU", receipt.Items[0].Name);
+        Assert.Contains("V18X-BLUEBERRY", receipt.Items[0].Name);
+        Assert.DoesNotContain("85434000", receipt.Items[0].Name);
         Assert.Equal(1m, receipt.Items[0].Quantity);
         Assert.Equal(1.16m, receipt.Items[0].Amount);
         Assert.Equal(0.155m, receipt.Items[0].TaxRate);

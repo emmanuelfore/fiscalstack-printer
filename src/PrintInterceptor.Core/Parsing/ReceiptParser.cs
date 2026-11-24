@@ -17,12 +17,22 @@ public sealed class ReceiptParser
 
     private const int MaxTaxCodeLength = 4;
 
+    /// <summary>Labels that explicitly name the invoice currency, in priority order.</summary>
+    private static readonly string[] CurrencyLabels =
+    [
+        "invoiced currency",
+        "invoice currency",
+        "currency code",
+        "currency"
+    ];
+
     private readonly ParseConfig _config;
     private readonly Regex _emailPattern;
     private readonly Regex _invoiceNumberPattern;
     private readonly Regex _invoiceRowPattern;
     private readonly Regex _currencyBeforeAmountPattern;
     private readonly Regex _buyerLabelPattern;
+    private readonly Regex _buyerForeignColumnPattern;
     private readonly Regex _amountLinePattern;
     private readonly Regex _twoLineQuantityPattern;
     private readonly Regex _twoLineNameAmountPattern;
@@ -48,6 +58,10 @@ public sealed class ReceiptParser
         _invoiceRowPattern = Compile(patterns.InvoiceRow, timeout, RegexOptions.IgnoreCase);
         _currencyBeforeAmountPattern = Compile(patterns.CurrencyBeforeAmount, timeout, RegexOptions.None);
         _buyerLabelPattern = Compile(patterns.BuyerLabel, timeout, RegexOptions.IgnoreCase);
+        _buyerForeignColumnPattern = new Regex(
+            @"\s{2,}(?:Account|Bank|Sales|Customer|Buyer|Client|TIN|VAT|No\.?|Name|Address|E-mail|Email|Phone|Telephone|Cell|Trade)\b[^:]{0,40}:.*$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant,
+            timeout);
         _amountLinePattern = Compile(patterns.AmountLine, timeout, RegexOptions.IgnoreCase);
         _twoLineQuantityPattern = Compile(patterns.TwoLineQuantity, timeout, RegexOptions.None);
         _twoLineNameAmountPattern = Compile(patterns.TwoLineNameAmount, timeout, RegexOptions.None);
@@ -1152,6 +1166,11 @@ public sealed class ReceiptParser
         }
 
         var name = Regex.Replace(value.Trim(), @"^Name\s*[:=\-]?\s*", "", RegexOptions.IgnoreCase);
+
+        // A4 invoices print the buyer and bank details as two columns on one physical
+        // line. Without this, "Customer Name: Acme   Account Name: Bank" becomes the
+        // buyer's name instead of just "Acme".
+        name = _buyerForeignColumnPattern.Replace(name, "").Trim();
         if (name.Length == 0 || _buyerLabelPattern.IsMatch(name) || !name.Any(char.IsLetter))
         {
             return null;
@@ -1291,16 +1310,33 @@ public sealed class ReceiptParser
     private string DetectCurrency(string[] lines)
     {
         var currencies = _config.Currencies ?? ParseConfig.DefaultCurrencies();
+
+        // A labelled currency wins over a loose keyword elsewhere on the page. A4
+        // Palladium invoices print "Account Type : ZWG" before "Invoiced Currency:
+        // USD", so scanning the whole page would file a USD sale as ZWG.
         foreach (var line in lines)
         {
-            foreach (var currency in currencies)
+            foreach (var label in CurrencyLabels)
             {
-                if (!string.IsNullOrWhiteSpace(currency.Keyword) &&
-                    line.Contains(currency.Keyword, StringComparison.OrdinalIgnoreCase))
+                var index = line.IndexOf(label, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
                 {
-                    return NormalizeCurrency(currency.Name);
+                    continue;
+                }
+
+                var value = line[(index + label.Length)..].TrimStart(':', '=', '-', '|').Trim();
+                var labelled = FindCurrency(value, currencies);
+                if (labelled is not null)
+                {
+                    return NormalizeCurrency(labelled);
                 }
             }
+        }
+
+        var loose = lines.Select(line => FindCurrency(line, currencies)).FirstOrDefault(name => name is not null);
+        if (loose is not null)
+        {
+            return NormalizeCurrency(loose);
         }
 
         if (lines.Any(line => _currencyBeforeAmountPattern.IsMatch(line)))
@@ -1309,6 +1345,20 @@ public sealed class ReceiptParser
         }
 
         return NormalizeCurrency(_config.Currency);
+    }
+
+    private static string? FindCurrency(string text, IEnumerable<CurrencyKeyword> currencies)
+    {
+        foreach (var currency in currencies)
+        {
+            if (!string.IsNullOrWhiteSpace(currency.Keyword) &&
+                text.Contains(currency.Keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                return currency.Name;
+            }
+        }
+
+        return null;
     }
 
     private static string NormalizeCurrency(string? currency)

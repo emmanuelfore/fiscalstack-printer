@@ -76,7 +76,7 @@
       "powered by"
     ],
     "patterns": {
-      "invoiceRow": "^\\s*(?<name>.*?)(?<qty>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*(?<unit>EA|EACH|UNIT|UNITS|PCS|PC|KG|KGS|BOX|CTN|[A-Z]{1,4})\\s*(?<price>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*(?<vatAmount>[+-]?\\d+(?:\\.\\d{1,2})?)\\s*(?<exclusive>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*$",
+      "invoiceRow": "^\\s*(?:\\d{1,3}\\s+)?(?:\\d{6,10}\\s*)?(?<name>.*?)(?<qty>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*(?<unit>EA|EACH|UNIT|UNITS|PCS|PC|KG|KGS|BOX|CTN|[A-Z]{1,4})\\s*(?<price>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*(?<vatAmount>[+-]?\\d+(?:\\.\\d{1,2})?)\\s*(?<exclusive>[-+]?\\d+(?:\\.\\d{1,2})?)\\s*$",
       "buyerLabel": "^(Customer|Buyer|Client|TIN|VAT|No\\.?|Name|Address|E-mail|Email|Phone|Telephone|Cell)\\b",
       "amountLine": "^[+-]?\\s*[A-Z]{0,3}\\s*[+-]?\\d{1,3}(?:,\\d{3})*(?:\\.\\d{1,2})?$"
     },
