@@ -97,6 +97,27 @@ public sealed class PrintSnapshotStore
     /// </summary>
     public ReceiptPrintModel? LoadDurable(string hash) => Load(hash) ?? _archive.LoadByHash(hash);
 
+    /// <summary>
+    /// Removes a reprint snapshot when its local-only hold was deleted. The permanent fiscal
+    /// archive is never removed here: a real receipt is not undone by a local deletion.
+    /// </summary>
+    public void DeleteLocalSnapshot(string hash)
+    {
+        try
+        {
+            var path = PathFor(hash);
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                _log.Info($"Removed print snapshot for deleted local hold [{Short(hash)}].");
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"Could not remove the print snapshot for a deleted local hold: {ex.Message}");
+        }
+    }
+
     public void Prune()
     {
         if (_retentionDays <= 0 || !Directory.Exists(_directory))

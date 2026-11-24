@@ -22,8 +22,10 @@ namespace PrintInterceptor;
 
 /// <summary>
 /// Tray mode runs the listener and the fiscalisation pipeline in a single
-/// desktop process. It shows API connectivity, pending offline receipts and a
-/// settings dialog. A Windows service cannot host a tray icon (session 0).
+/// desktop process. The icon reports the live FDMS device state — green only for a
+/// confirmed open fiscal day with no local work waiting — and the menu surfaces
+/// urgent review, failure and sync alerts. A Windows service cannot host a tray
+/// icon (session 0).
 /// </summary>
 public sealed class TrayApplicationContext : ApplicationContext
 {
@@ -63,6 +65,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly Icon _pendingIcon;
     private readonly Icon _offlineIcon;
     private FiscalDeviceStatus? _deviceStatus;
+    private string? _deviceError;
     private DateTimeOffset _deviceStatusAt = DateTimeOffset.MinValue;
     private string? _lastCloseFailure;
     private bool _suppressNextCloseNotice;
@@ -187,6 +190,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
             else
             {
+                _deviceError = online ? "API key required" : null;
                 ApplyDeviceStatus(null);
             }
 
@@ -196,9 +200,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             UpdateReviewCount();
             UpdateFailureAlerts();
 
-            _statusItem.Text = online
-                ? "Fiscalisation API: ONLINE"
-                : "Fiscalisation API: OFFLINE";
+            _statusItem.Text = FdmsStatusText(online);
             _pauseItem.Visible = paused;
 
             if (paused && !_wasPaused)
@@ -223,17 +225,23 @@ public sealed class TrayApplicationContext : ApplicationContext
             var capturePaused = _server.IsProcessingPaused;
             _capturePauseItem.Text = capturePaused ? "Resume capture" : "Pause capture";
 
-            _notifyIcon.Icon = paused || !online
+            // The icon reports the fiscal device, not merely an HTTP ping. Green means FDMS
+            // answered with an open fiscal day and this till has no local work waiting.
+            var apiKeyMissing = string.IsNullOrWhiteSpace(_config.ApiKey);
+            var fdmsKnown = online && !apiKeyMissing && _deviceStatus is not null;
+            var fdmsReady = fdmsKnown && _deviceStatus!.IsDayOpen && !_deviceStatus.IsClosePending;
+            var localAttention = paused || capturePaused || _failuresItem.Visible ||
+                                 _reviewItem.Visible || pending > 0;
+            _notifyIcon.Icon = !fdmsKnown
                 ? _offlineIcon
-                : capturePaused || _failuresItem.Visible || _reviewItem.Visible || pending > 0
-                    ? _pendingIcon
-                    : _onlineIcon;
+                : fdmsReady && !localAttention
+                    ? _onlineIcon
+                    : _pendingIcon;
 
-            var parts = new List<string> { online ? "API online" : "API OFFLINE" };
-            if (_deviceStatus is { } dayStatus)
+            var parts = new List<string> { FdmsStatusText(online) };
+            if (_deviceStatus is { } dayStatus && fdmsKnown)
             {
-                var day = dayStatus.FiscalDayNo is int number ? $"day {number} " : "day ";
-                parts.Add(day + (dayStatus.IsDayOpen ? "open" : "closed"));
+                parts.Add(dayStatus.FiscalDayNo is int number ? $"day {number}" : "fiscal day unknown");
             }
 
             if (pending > 0) parts.Add($"{pending} queued");
@@ -264,6 +272,50 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// The tray's headline status is the fiscal device at FDMS/ZIMRA, not the API ping. Any
+    /// API problem, missing key, failed status read or non-open day is spelled out here.
+    /// </summary>
+    private string FdmsStatusText(bool online)
+    {
+        if (!online)
+        {
+            return "FDMS: OFFLINE — FiscalStack API unreachable";
+        }
+
+        if (string.IsNullOrWhiteSpace(_config.ApiKey))
+        {
+            return "FDMS: unavailable — API key required";
+        }
+
+        if (_deviceStatus is not { } status)
+        {
+            return string.IsNullOrWhiteSpace(_deviceError)
+                ? "FDMS: unavailable — device status not checked"
+                : "FDMS: unavailable — " + Truncate(_deviceError, 90);
+        }
+
+        var day = status.FiscalDayNo is int number ? $"day {number}" : "fiscal day";
+        if (status.IsClosePending)
+        {
+            return $"FDMS: {day} close failed — retry close";
+        }
+
+        if (string.Equals(status.FiscalDayStatus, "FiscalDayCloseInitiated", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"FDMS: {day} closing — wait for the gateway";
+        }
+
+        if (!status.IsDayOpen)
+        {
+            return string.IsNullOrWhiteSpace(status.FiscalDayStatus)
+                ? "FDMS: device answered, fiscal day state unknown — check Fiscal status"
+                : $"FDMS: {day} {status.FiscalDayStatus} — open a fiscal day before capturing";
+        }
+
+        return $"FDMS: ONLINE — {day} open";
+    }
+
     private async Task RefreshDeviceStatusAsync(bool force)
     {
         if (_dayActionInFlight && !force)
@@ -292,7 +344,9 @@ public sealed class TrayApplicationContext : ApplicationContext
         _deviceStatusAt = DateTimeOffset.UtcNow;
         try
         {
-            ApplyDeviceStatus(await _client.GetDeviceStatusAsync(_cts.Token));
+            var result = await _client.GetDeviceStatusAsync(_cts.Token);
+            _deviceError = result.Success ? null : result.Error;
+            ApplyDeviceStatus(result);
         }
         catch (OperationCanceledException)
         {
@@ -300,6 +354,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         catch (Exception ex)
         {
             _log.Warn($"Tray device status refresh failed: {ex.Message}");
+            _deviceError = ex.Message;
             ApplyDeviceStatus(null);
         }
         finally

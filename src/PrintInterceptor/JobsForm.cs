@@ -23,6 +23,7 @@ public sealed class JobsForm : Form
     private const int ColOpen = 6;
     private const int ColPdf = 7;
     private const int ColReprint = 8;
+    private const int ColDelete = 9;
 
     private readonly JobLedger _ledger;
     private readonly PrintSnapshotStore _snapshots;
@@ -35,10 +36,14 @@ public sealed class JobsForm : Form
     private readonly TextBox _search;
     private readonly TextBox _details;
     private readonly CardPanel _reviewNote;
+    private readonly TextBox _reviewText;
+    private readonly Label _reviewTitle;
+    private readonly RowStyle _reviewRow;
     private readonly Button _reprint;
     private readonly Button _openJob;
     private readonly Button _savePdf;
     private readonly Button _previewPdf;
+    private readonly Button _deleteLocal;
     private readonly Button _closeButton;
     private readonly Label _count;
 
@@ -82,8 +87,8 @@ public sealed class JobsForm : Form
         ShowInTaskbar = true;
         BackColor = UiTheme.Canvas;
         Font = UiTheme.Ui(9f);
-        ClientSize = new Size(1180, 720);
-        MinimumSize = new Size(980, 620);
+        ClientSize = new Size(1180, 760);
+        MinimumSize = new Size(1000, 700);
 
         var root = new TableLayoutPanel
         {
@@ -97,7 +102,7 @@ public sealed class JobsForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 206));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 270));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
 
         var header = new Panel { Dock = DockStyle.Fill, BackColor = UiTheme.Surface, Padding = new Padding(20, 12, 20, 8) };
@@ -168,9 +173,19 @@ public sealed class JobsForm : Form
                 return;
             }
 
-            e.ToolTipText = e.ColumnIndex == ColDetail
-                ? _list.Rows[e.RowIndex].Tag is LedgerEntry entry ? FullDetail(entry) : ""
-                : _list.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? "";
+            if (_list.Rows[e.RowIndex].Tag is not LedgerEntry entry)
+            {
+                return;
+            }
+
+            e.ToolTipText = e.ColumnIndex switch
+            {
+                ColDetail => FullDetail(entry),
+                ColDelete => CanDeleteLocal(entry, out var block)
+                    ? "Delete this local hold and its retained receipt from this till. Nothing was sent to FiscalStack."
+                    : block,
+                _ => _list.Rows[e.RowIndex].Cells[e.ColumnIndex].FormattedValue?.ToString() ?? ""
+            };
         };
         BuildColumns();
         _list.Columns[ColDetail].DefaultCellStyle.WrapMode = DataGridViewTriState.True;
@@ -183,8 +198,29 @@ public sealed class JobsForm : Form
         gridHost.Controls.Add(_list);
 
         var detailCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(14, 4, 14, 4) };
+
+        // A table keeps the heading, the review explanation and the job record in fixed
+        // bands. Docking them directly in the card let the record collapse to a single
+        // line when a long review note was visible.
+        var detailLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = Color.Transparent,
+            Margin = Padding.Empty
+        };
+        detailLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        _reviewRow = new RowStyle(SizeType.Absolute, 0);
+        detailLayout.RowStyles.Add(_reviewRow);
+        detailLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
         var detailTitle = UiTheme.Heading("Selected job");
-        detailTitle.Dock = DockStyle.Top;
+        detailTitle.Dock = DockStyle.Fill;
+        detailTitle.AutoSize = false;
+        detailTitle.Margin = new Padding(2, 0, 2, 0);
+
         _details = new TextBox
         {
             Dock = DockStyle.Fill,
@@ -195,18 +231,60 @@ public sealed class JobsForm : Form
             BackColor = UiTheme.Surface,
             Font = UiTheme.Mono(8.5f),
             ForeColor = UiTheme.Text,
-            Padding = new Padding(4, 6, 4, 4)
+            Padding = new Padding(4, 6, 4, 4),
+            WordWrap = true
         };
         UiTheme.Input(_details);
         _details.BorderStyle = BorderStyle.None;
         _details.Font = UiTheme.Mono(8.5f);
-        _reviewNote = UiTheme.Notice("Needs review", "", UiTheme.WarningBg, UiTheme.Warning);
-        _reviewNote.Dock = DockStyle.Top;
-        _reviewNote.Height = 104;
-        _reviewNote.Visible = false;
-        detailCard.Controls.Add(_details);
-        detailCard.Controls.Add(_reviewNote);
-        detailCard.Controls.Add(detailTitle);
+
+        _reviewNote = new CardPanel
+        {
+            Dock = DockStyle.Fill,
+            CardBackColor = UiTheme.WarningBg,
+            CardBorderColor = UiTheme.Warning,
+            CornerRadius = 10,
+            Padding = new Padding(10, 8, 10, 8),
+            Margin = new Padding(2, 0, 2, 2),
+            Visible = false
+        };
+        var reviewLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            BackColor = Color.Transparent,
+            Margin = Padding.Empty
+        };
+        reviewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        reviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+        reviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        _reviewTitle = UiTheme.SectionLabel("NEEDS REVIEW — READ THE CAUSE BEFORE ACTING");
+        _reviewTitle.Dock = DockStyle.Fill;
+        _reviewTitle.ForeColor = UiTheme.Warning;
+        _reviewTitle.Margin = Padding.Empty;
+        _reviewText = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical,
+            BorderStyle = BorderStyle.None,
+            BackColor = UiTheme.WarningBg,
+            ForeColor = UiTheme.Text,
+            Font = UiTheme.Ui(8.5f),
+            WordWrap = true,
+            Margin = Padding.Empty,
+            Padding = new Padding(2)
+        };
+        reviewLayout.Controls.Add(_reviewTitle, 0, 0);
+        reviewLayout.Controls.Add(_reviewText, 0, 1);
+        _reviewNote.Controls.Add(reviewLayout);
+
+        detailLayout.Controls.Add(detailTitle, 0, 0);
+        detailLayout.Controls.Add(_reviewNote, 0, 1);
+        detailLayout.Controls.Add(_details, 0, 2);
+        detailCard.Controls.Add(detailLayout);
 
         var actions = new FlowLayoutPanel
         {
@@ -253,11 +331,15 @@ public sealed class JobsForm : Form
         _openJob = Action("Open source");
         _openJob.Enabled = false;
         _openJob.Click += (_, _) => OpenSourceJob();
+        _deleteLocal = Action("Delete local hold");
+        _deleteLocal.Enabled = false;
+        _deleteLocal.Click += (_, _) => DeleteSelected();
         var detailsButton = Action("Full detail");
 
         detailsButton.Click += (_, _) => ShowSelectedDetails();
 
         actions.Controls.Add(close);
+        actions.Controls.Add(_deleteLocal);
         actions.Controls.Add(_reprint);
         actions.Controls.Add(_savePdf);
         actions.Controls.Add(_previewPdf);
@@ -279,33 +361,34 @@ public sealed class JobsForm : Form
     {
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Updated", DataPropertyName = "Updated", Width = 128
+            HeaderText = "Updated", DataPropertyName = "Updated", Width = 112
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Invoice", DataPropertyName = "Invoice", Width = 150
+            HeaderText = "Invoice", DataPropertyName = "Invoice", Width = 140
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Status", DataPropertyName = "Status", Width = 122
+            HeaderText = "Status", DataPropertyName = "Status", Width = 108
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Total", DataPropertyName = "Total", Width = 106,
+            HeaderText = "Total", DataPropertyName = "Total", Width = 96,
             DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleRight }
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Print", DataPropertyName = "Print", Width = 104
+            HeaderText = "Print", DataPropertyName = "Print", Width = 88
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            HeaderText = "Detail", DataPropertyName = "Detail", Width = 240
+            HeaderText = "Detail", DataPropertyName = "Detail", Width = 220
         });
 
         AddActionColumn("Open", UiTheme.Accent, UiTheme.AccentLight);
         AddActionColumn("PDF", UiTheme.Success, UiTheme.SuccessBg);
         AddActionColumn("Print", UiTheme.Warning, UiTheme.WarningBg);
+        AddActionColumn("Delete", UiTheme.Danger, UiTheme.DangerBg);
         ResizeColumns();
     }
 
@@ -315,8 +398,8 @@ public sealed class JobsForm : Form
         {
             HeaderText = "",
             Text = text,
-            Width = 88,
-            MinimumWidth = 88,
+            Width = 76,
+            MinimumWidth = 76,
             SortMode = DataGridViewColumnSortMode.NotSortable
         };
         UiTheme.ButtonColumn(column, fore, back);
@@ -352,7 +435,8 @@ public sealed class JobsForm : Form
                 ShortDetail(entry),
                 "Open",
                 "PDF",
-                "Print");
+                "Print",
+                "Delete");
             _list.Rows[index].Tag = entry;
             shown++;
         }
@@ -420,23 +504,35 @@ public sealed class JobsForm : Form
             return;
         }
 
-        if (e.ColumnIndex is ColOpen or ColPdf or ColReprint)
+        if (e.ColumnIndex is ColOpen or ColPdf or ColReprint or ColDelete)
         {
             e.PaintBackground(e.CellBounds, true);
             var (fore, back) = e.ColumnIndex switch
             {
                 ColOpen => (UiTheme.Accent, UiTheme.AccentLight),
                 ColPdf => (UiTheme.Success, UiTheme.SuccessBg),
-                _ => (UiTheme.Warning, UiTheme.WarningBg)
+                ColReprint => (UiTheme.Warning, UiTheme.WarningBg),
+                _ => (UiTheme.Danger, UiTheme.DangerBg)
             };
-            UiTheme.PaintPill(graphics, e.CellBounds, e.FormattedValue?.ToString() ?? "", fore, back);
+
+            var label = e.FormattedValue?.ToString() ?? "";
+            if (e.ColumnIndex == ColDelete &&
+                _list.Rows[e.RowIndex].Tag is LedgerEntry entry &&
+                !CanDeleteLocal(entry, out _))
+            {
+                label = "";
+                fore = UiTheme.Muted;
+                back = UiTheme.NeutralBg;
+            }
+
+            UiTheme.PaintPill(graphics, e.CellBounds, label, fore, back);
             e.Handled = true;
         }
     }
 
     private void OnCellClick(DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex < 0 || e.ColumnIndex is not (ColOpen or ColPdf or ColReprint))
+        if (e.RowIndex < 0 || e.ColumnIndex is not (ColOpen or ColPdf or ColReprint or ColDelete))
         {
             return;
         }
@@ -449,6 +545,10 @@ public sealed class JobsForm : Form
         else if (e.ColumnIndex == ColPdf)
         {
             SavePdfSelected();
+        }
+        else if (e.ColumnIndex == ColDelete)
+        {
+            DeleteSelected();
         }
         else
         {
@@ -519,6 +619,7 @@ public sealed class JobsForm : Form
         _savePdf.Enabled = entry is not null && FiscalDocumentActions.CanSavePdf(entry, _snapshots);
         _previewPdf.Enabled = _savePdf.Enabled;
         _openJob.Enabled = entry is not null && FiscalDocumentActions.CanOpen(entry, _snapshots, _jobs);
+        _deleteLocal.Enabled = entry is not null && CanDeleteLocal(entry, out _);
         _details.Text = entry is null ? "" : Describe(entry);
         ShowReviewNote(entry);
     }
@@ -527,17 +628,24 @@ public sealed class JobsForm : Form
     {
         if (entry?.Status != LedgerStatus.NeedsReview)
         {
+            _reviewRow.Height = 0;
             _reviewNote.Visible = false;
             return;
         }
 
-        var text = (Label)_reviewNote.Tag!;
-        text.Text = UiTheme.SafeText(string.Join(Environment.NewLine,
+        var deletable = CanDeleteLocal(entry, out _);
+        _reviewTitle.Text = UiTheme.SafeText(deletable
+            ? "NEEDS REVIEW — NO REQUEST WAS SENT; THIS LOCAL HOLD CAN BE DELETED"
+            : "NEEDS REVIEW — KEEP THE RECORD FOR RECONCILIATION");
+        _reviewText.Text = string.Join(Environment.NewLine,
             $"Stage: {entry.ReviewStageText}",
             $"Cause: {entry.ReviewReasonText}",
             $"Next step: {entry.ReviewNextStepText}",
-            $"Warnings: {entry.ReviewWarningsText}"));
+            $"Warnings: {entry.ReviewWarningsText}");
+        _reviewText.SelectionStart = 0;
+        _reviewText.ScrollToCaret();
         _reviewNote.Visible = true;
+        _reviewRow.Height = 104;
     }
 
     private void ShowSelectedDetails(bool preview = false)
@@ -587,6 +695,70 @@ public sealed class JobsForm : Form
             $"Source job...... {OrDash(entry.SourceFile)}",
             $"Fiscal copy..... {copy}"
         });
+    }
+
+    /// <summary>Used by the dashboard's refresh control to re-read this page too.</summary>
+    public void RefreshView() => RefreshList();
+
+    private bool CanDeleteLocal(LedgerEntry entry, out string reason)
+    {
+        // The request body is written just before the gateway call. If one survived, this job
+        // may have been sent even when the ledger predates the RequestCreated flag.
+        var requestBodyRetained = _jobs.LoadRequest(entry.SourceFile) is not null;
+        reason = entry.LocalDeletionBlockReason(requestBodyRetained) ?? "";
+        return reason.Length == 0;
+    }
+
+    private void DeleteSelected()
+    {
+        if (SelectedEntry() is not { } entry)
+        {
+            return;
+        }
+
+        if (!CanDeleteLocal(entry, out var block))
+        {
+            MessageBox.Show(UiTheme.DialogOwner(this), block, "This job cannot be deleted",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var answer = MessageBox.Show(UiTheme.DialogOwner(this),
+            $"Delete the local hold for {entry.InvoiceNumber ?? "this invoice"}?" +
+            Environment.NewLine + Environment.NewLine +
+            "No fiscal request was created for this job. Its ledger entry, retained receipt text " +
+            "and stored original will be removed from this till. This cannot be undone.",
+            "Delete local hold",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (answer != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var requestBodyRetained = _jobs.LoadRequest(entry.SourceFile) is not null;
+            if (!_ledger.DeleteLocalHold(entry.Hash, requestBodyRetained, out var error))
+            {
+                MessageBox.Show(UiTheme.DialogOwner(this), error, "This job cannot be deleted",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            _jobs.DeleteRetained(entry.Hash, entry.SourceFile);
+            _snapshots.DeleteLocalSnapshot(entry.Hash);
+            RefreshList();
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Deleting a local hold failed", ex);
+            MessageBox.Show(UiTheme.DialogOwner(this), ex.Message, "Could not delete the local hold",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            RefreshList();
+        }
     }
 
     private void SavePdfSelected()
@@ -668,7 +840,7 @@ public sealed class JobsForm : Form
 
     private void ResizeColumns()
     {
-        if (_list.Columns.Count < 9)
+        if (_list.Columns.Count <= ColDelete)
         {
             return;
         }

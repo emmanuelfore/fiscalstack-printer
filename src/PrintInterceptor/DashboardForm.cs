@@ -76,6 +76,7 @@ public sealed class DashboardForm : Form
     private FiscalDeviceStatus? _deviceStatus;
     private DateTimeOffset _deviceStatusAt = DateTimeOffset.MinValue;
     private bool _refreshing;
+    private bool _refreshAgain;
     private bool _dayActionInFlight;
 
     private readonly DashboardActions _actions;
@@ -152,9 +153,10 @@ public sealed class DashboardForm : Form
             Margin = new Padding(12, 10, 3, 3)
         };
 
-        var refresh = new Button { Text = "Refresh", AutoSize = true, MinimumSize = new Size(92, 30) };
+        var refresh = new Button { Text = "Refresh now", AutoSize = true, MinimumSize = new Size(104, 30) };
         UiTheme.Secondary(refresh);
-        refresh.Click += (_, _) => _ = RefreshAsync(forceDevice: true);
+        refresh.Click += (_, _) => RefreshDashboard();
+        UiTheme.Tip(refresh, "Re-read the local ledger and the live FDMS device status.");
 
         var header = new FlowLayoutPanel
         {
@@ -531,24 +533,47 @@ public sealed class DashboardForm : Form
         AddNav(nav, "Capture layout", tool: "capture");
         AddNav(nav, "Files && tools", "Tools");
 
-        var footer = new Panel { Dock = DockStyle.Bottom, Height = 126 };
+        var footer = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 166,
+            ColumnCount = 1,
+            RowCount = 4,
+            BackColor = UiTheme.Navy,
+            Padding = new Padding(0)
+        };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 28f));
+        footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+        footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+        footer.RowStyles.Add(new RowStyle(SizeType.Absolute, 42f));
+
+        var refreshSidebar = new Button { Text = "↻ Refresh now", Dock = DockStyle.Fill, Margin = new Padding(8, 2, 8, 2) };
+        UiTheme.NavButton(refreshSidebar, selected: false, dark: true);
+        refreshSidebar.Height = 34;
+        refreshSidebar.Click += (_, _) => RefreshDashboard();
+
         var updates = new Button
         {
             Text = "Check for updates",
-            Dock = DockStyle.Top,
-            Height = 32,
+            Dock = DockStyle.Fill,
             FlatStyle = FlatStyle.Flat,
             Font = UiTheme.Ui(9f),
             BackColor = UiTheme.NavySoft,
             ForeColor = Color.FromArgb(203, 213, 225),
             TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(8, 2, 8, 2),
             Padding = new Padding(14, 0, 8, 0)
         };
         updates.FlatAppearance.BorderSize = 0;
         updates.Click += (_, _) => RunTool("updates");
-        footer.Controls.Add(_pauseButton);
-        footer.Controls.Add(updates);
-        footer.Controls.Add(_captureState);
+        _pauseButton.Margin = new Padding(8, 2, 8, 2);
+        _captureState.Margin = new Padding(16, 6, 8, 0);
+
+        footer.Controls.Add(_captureState, 0, 0);
+        footer.Controls.Add(refreshSidebar, 0, 1);
+        footer.Controls.Add(updates, 0, 2);
+        footer.Controls.Add(_pauseButton, 0, 3);
 
         sidebar.Controls.Add(nav);
         sidebar.Controls.Add(footer);
@@ -749,6 +774,27 @@ public sealed class DashboardForm : Form
         return page;
     }
 
+    private void RefreshDashboard()
+    {
+        // A click during the timed refresh must still force a fresh device read, otherwise
+        // the button appears to do nothing for up to ten seconds.
+        if (_refreshing)
+        {
+            _refreshAgain = true;
+        }
+        else
+        {
+            _ = RefreshAsync(forceDevice: true);
+        }
+
+        if (_currentPage == "Jobs" &&
+            _pageCache.TryGetValue("Jobs", out var jobsPage) &&
+            jobsPage is JobsForm jobs)
+        {
+            jobs.RefreshView();
+        }
+    }
+
     private void RunTool(string id)
     {
         _actions.RunTool(id);
@@ -824,7 +870,18 @@ public sealed class DashboardForm : Form
     {
         if (_refreshing || _cts.IsCancellationRequested)
         {
+            if (_refreshing)
+            {
+                _refreshAgain = true;
+            }
+
             return;
+        }
+
+        if (_refreshAgain)
+        {
+            forceDevice = true;
+            _refreshAgain = false;
         }
 
         _refreshing = true;
@@ -897,6 +954,11 @@ public sealed class DashboardForm : Form
         finally
         {
             _refreshing = false;
+            if (_refreshAgain && !_cts.IsCancellationRequested)
+            {
+                _refreshAgain = false;
+                _ = RefreshAsync(forceDevice: true);
+            }
         }
     }
 
@@ -938,7 +1000,17 @@ public sealed class DashboardForm : Form
         var held = entries.Where(entry => entry.Status == LedgerStatus.NeedsReview).ToList();
         var latestHold = held.OrderByDescending(entry => entry.UpdatedAt).FirstOrDefault();
 
-        SetCheck(_checkFdms, _deviceStatus is not null, _deviceStatus is null ? "Not reachable / not checked" : "Healthy");
+        var device = _deviceStatus;
+        var fdmsReady = device is { } known && known.IsDayOpen && !known.IsClosePending;
+        var fdmsText = device is null
+            ? "Not reachable / not checked"
+            : fdmsReady
+                ? $"day {device.FiscalDayNo?.ToString() ?? "unknown"} open"
+                : $"{device.FiscalDayStatus}: open a fiscal day before capturing";
+        SetCheck(_checkFdms, fdmsReady, fdmsText);
+        UiTheme.Tip(_checkFdms, fdmsReady
+            ? $"FDMS device {device!.DeviceId} reports an open fiscal day."
+            : "The tray icon is green only when FDMS confirms an open fiscal day and this till has no local work waiting.");
         SetCheck(_checkQueue, pending == 0, pending == 0 ? "OK" : $"{pending} pending");
         SetCheck(_checkReview, held.Count == 0, held.Count == 0 ? "OK" : $"{held.Count} held — {HoldSummary(latestHold)}");
         if (latestHold is not null)
@@ -964,12 +1036,15 @@ public sealed class DashboardForm : Form
         return $"{entry.ReviewStageText}: {entry.ReviewReasonText}";
     }
 
-    private static string FullHoldText(LedgerEntry entry)
+    private string FullHoldText(LedgerEntry entry)
     {
+        var deletable = entry.LocalDeletionBlockReason(_jobs.LoadRequest(entry.SourceFile) is not null) is null;
         var lines = new List<string>
         {
             HoldSummary(entry),
-            "Nothing was sent to FiscalStack for this job.",
+            deletable
+                ? "No fiscalisation request was created for this local hold; Jobs can delete it."
+                : "This record reached the fiscalisation step or produced a receipt, so Jobs keeps it for reconciliation.",
             "Next step: " + entry.ReviewNextStepText,
             "Warnings: " + entry.ReviewWarningsText,
             "Open Fiscalisation jobs for the full record."

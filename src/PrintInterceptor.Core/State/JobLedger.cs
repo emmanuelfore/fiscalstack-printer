@@ -114,7 +114,90 @@ public sealed class LedgerEntry
     public string ReviewWarningsText =>
         ReviewWarnings.Length == 0 ? "None recorded" : string.Join(" | ", ReviewWarnings);
 
+    /// <summary>
+    /// Why this entry cannot be removed from the local ledger, or null when the operator may
+    /// delete it. A held job is deletable only when it was stopped before a fiscalisation
+    /// request was built; anything that reached the gateway, signed offline or produced a
+    /// receipt stays as the till's audit record.
+    /// </summary>
+    public string? LocalDeletionBlockReason(bool requestBodyRetained)
+    {
+        if (Status != LedgerStatus.NeedsReview)
+        {
+            return "Only jobs held before fiscalisation can be deleted. This job has a gateway outcome or is still being processed.";
+        }
+
+        if (RequestCreated)
+        {
+            return "This job reached the fiscalisation step. Its request may have reached FiscalStack, so the record must stay for reconciliation.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(FiscalCode) || !string.IsNullOrWhiteSpace(QrCode) ||
+            !string.IsNullOrWhiteSpace(VerificationCode) || ReceiptNumber is not null ||
+            ReceiptCounter is not null || ReceiptGlobalNo is not null || FiscalDayNo is not null)
+        {
+            return "This job already has a fiscal receipt. It must stay in the ledger.";
+        }
+
+        if (OfflineOrigin || !string.IsNullOrWhiteSpace(OfflineSignature) || SyncedAt is not null)
+        {
+            return "This job spent an offline signing counter. It must stay in the ledger until it has synced.";
+        }
+
+        if (PrintStatus is not ("NotRequested" or ""))
+        {
+            return "A copy of this job was already printed or sent to the printer. Keep its record.";
+        }
+
+        if (DuplicateAttemptCount > 0 || ReconcileAttempts > 0)
+        {
+            return "This job already has a duplicate or reconciliation history. Keep its record.";
+        }
+
+        if (requestBodyRetained)
+        {
+            return "A fiscalisation request body is retained for this job. It may have been sent, so the record must stay.";
+        }
+
+        var stage = ReviewStage ?? "";
+        if (Mentions(stage, "reconcil", "offline", "gateway", "zimra", "server", "sync"))
+        {
+            return "This hold happened after a gateway or offline step. It cannot be deleted locally.";
+        }
+
+        if (Mentions(stage, "parse", "configuration", "api key", "apikey", "date"))
+        {
+            return null;
+        }
+
+        var reason = Error ?? "";
+        if (Mentions(reason, "reconcil", "gateway", "zimra", "timed out", "timeout", "signed",
+                "offline", "queue", "request body", "server answered", "receipt exists"))
+        {
+            return "The recorded cause means FiscalStack or the offline signer was involved. This record must stay.";
+        }
+
+        if (Mentions(reason, "parse", "rule", "negative amount", "sale and a return", "api key",
+                "apikey", "no line items", "currently-open day", "held rather than sent", "could not be parsed"))
+        {
+            return null;
+        }
+
+        return "This is an older hold with no recorded pre-request stage. Keep it unless an operator can confirm nothing was sent.";
+    }
+
+    private static bool Mentions(string value, params string[] needles) =>
+        needles.Any(needle => value.Contains(needle, StringComparison.OrdinalIgnoreCase));
+
     public string? SourceFile { get; set; }
+
+    /// <summary>
+    /// A fiscalisation claim was made for this job, so a request body was built and may have
+    /// reached FiscalStack. Only jobs that never reached this point can be deleted locally.
+    /// Older ledger entries have no key and are judged from their stage and outcome instead.
+    /// </summary>
+    public bool RequestCreated { get; set; }
+
     public string? OfflineSignature { get; set; }
     public string? OfflineReceiptDate { get; set; }
 
@@ -539,6 +622,7 @@ public sealed class JobLedger
             entry.Total = total;
             entry.Currency = currency;
             entry.SourceFile = sourceFile;
+            entry.RequestCreated = true;
             ClearReview(entry);
             entry.UpdatedAt = now;
             entry.PrintStatus = "NotRequested";
@@ -714,6 +798,40 @@ public sealed class JobLedger
             entry.UpdatedAt = now;
             _document.Entries[hash] = entry;
             SaveLocked();
+        }
+    }
+
+    /// <summary>
+    /// Removes a local-only hold from this till. Refuses anything that reached a claim, built a
+    /// request, spent an offline counter or produced a receipt: deleting those would hide a sale
+    /// that may exist at ZIMRA. The deletion itself is logged so the action still has a trace.
+    /// </summary>
+    public bool DeleteLocalHold(string hash, bool requestBodyRetained, out string reason)
+    {
+        lock (_gate)
+        {
+            if (!_document.Entries.TryGetValue(hash, out var entry))
+            {
+                reason = "That job is no longer in the ledger.";
+                return false;
+            }
+
+            var block = entry.LocalDeletionBlockReason(requestBodyRetained);
+            if (block is not null)
+            {
+                reason = block;
+                return false;
+            }
+
+            _document.Entries.Remove(hash);
+            SaveLocked();
+            reason = "";
+            _log.Warn(
+                $"LOCAL HOLD DELETED [{Short(hash)}]: invoice={entry.InvoiceNumber ?? "-"} " +
+                $"businessDate={entry.BusinessDate} stage={entry.ReviewStageText}. " +
+                "No fiscalisation request was sent for this job; the ledger record and retained " +
+                "receipt were removed from this till only.");
+            return true;
         }
     }
 
@@ -902,6 +1020,7 @@ public sealed class JobLedger
         ReviewHint = entry.ReviewHint,
         ReviewWarnings = entry.ReviewWarnings.ToArray(),
         SourceFile = entry.SourceFile,
+        RequestCreated = entry.RequestCreated,
         OfflineSignature = entry.OfflineSignature,
         OfflineReceiptDate = entry.OfflineReceiptDate,
         OfflineOrigin = entry.OfflineOrigin,

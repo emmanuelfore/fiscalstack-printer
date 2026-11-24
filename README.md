@@ -391,10 +391,12 @@ process and adds a notification-area icon. Use it when the till should show fisc
 status without a Windows service. A service cannot host a tray icon (it runs in session 0),
 so choose one mode per till.
 
-- **Icon:** green = API online and queue empty; amber = API online with receipts waiting to
-  sync or capture paused; red = API unreachable, status unknown, or the sync queue is paused.
-  The tooltip shows the API state, fiscal day, queued receipts, receipts held for review and
-  whether capture is paused.
+- **Icon:** green = FDMS confirmed an open fiscal day and this till has no local work waiting;
+  amber = the device is known but the day is closed/closing, or receipts are queued, held for
+  review or being captured while paused; red = the API is unreachable, the API key is missing, or
+  the device status could not be read. The status line names the FDMS state and the tooltip adds
+  the fiscal day, queued receipts, receipts held for review and whether capture is paused. An API
+  ping alone never turns the icon green.
 - **Menu:** deliberately short — one live status line, urgent alerts (only when there is
   something to act on), *Show/Hide Dashboard*, *Pause/Resume capture*, *Start with Windows* and
   *Exit*. Everything else moved into the console. Day open/close still asks for confirmation and
@@ -407,8 +409,11 @@ so choose one mode per till.
   queued/retrying, needing review, totals by currency), the hourly activity chart, a compact
   fiscalisation worklist with status pills, and the fiscal-day card with its live timer and
   close-day checks. It reads the local ledger, so it works offline; only the device card needs
-  FiscalStack. The console stays open beside the till; the tray item and the icon toggle it
-  between shown and hidden. A first run opens straight to the Settings page.
+  FiscalStack. **Refresh now** in the overview header and the sidebar footer re-reads the ledger,
+  KPIs, worklist and close-day checks and forces a fresh FDMS device status request; it also
+  refreshes the Jobs page when that page is open. The console stays open beside the till; the
+  tray item and the icon toggle it between shown and hidden. A first run opens straight to the
+  Settings page.
 - **Parse rules** edits the resolved rules as real controls — labels, regex patterns, tax buckets,
   correction words, limits and currencies — on a draft that is validated before it can be saved.
   The *Test a receipt* page reparses pasted text with the draft, and *Save and apply* rebuilds the
@@ -449,7 +454,7 @@ keeps running in the notification area until *Exit* is chosen.
 
 **Jobs** is one compact worklist of every ledger entry with a status pill, print result and reason,
 searchable by invoice, fiscal code, verification code or source file and filterable by needs
-review / rejected / unknown outcome / fiscalised / printing problems. Each row has three actions:
+review / rejected / unknown outcome / fiscalised / printing problems. Each row has four actions:
 
 - **Open** — opens the retained POS document, or the human-readable fiscal archive when no source
   file survived retention.
@@ -460,11 +465,18 @@ review / rejected / unknown outcome / fiscalised / printing problems. Each row h
 - **Print** — prints the stored fiscal copy, marked **REPRINT**, on the configured printer. It
   falls back to the permanent `fiscalised/<date>/` archive when the short-lived print snapshot was
   pruned. The fiscalisation result is never sent to FiscalStack again.
+- **Delete** — removes a local hold only when the ledger proves it never reached fiscalisation
+  (parse, configuration or document-date hold, no request body, receipt or offline counter). The
+  ledger entry, retained receipt text and any stored original are removed from this till, and the
+  deletion is logged. Anything claimed for fiscalisation, answered by the gateway, signed offline,
+  printed or reconciled stays with its audit record; the permanent fiscal archive is never deleted.
 
-A double-click opens the job drawer with three tabs: the full record (including reprint count,
-suppressed duplicate attempts and reconciliation passes), the exact request body that was sent
-(as retained by `storage.retainJobs`), and the receipt text it was built from. It is a read-only
-investigation view: reprints still go through the explicit action after confirmation.
+A double-click opens the job drawer with four tabs: a PDF preview of the archived fiscal copy, the
+full record (including reprint count, suppressed duplicate attempts and reconciliation passes),
+the exact request body that was sent (as retained by `storage.retainJobs`), and the receipt text it
+was built from. Each tab uses wrapped text and its own scroll area so the summary and preview note
+no longer cover the content. It is a read-only investigation view: reprints still go through the
+explicit action after confirmation.
 
 ### Fiscal status and day control
 

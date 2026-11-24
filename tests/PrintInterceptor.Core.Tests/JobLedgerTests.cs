@@ -253,6 +253,83 @@ public sealed class JobLedgerTests : IDisposable
     }
 
     [Fact]
+    public void APreRequestHoldCanBeDeletedAndStaysDeletedAfterReload()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.RecordNeedsReview(
+            "hash-hold",
+            "INV-HOLD",
+            "20261124",
+            "The receipt could not be parsed.",
+            "jobs/2026-11-24/hash-hold.txt",
+            reviewStage: "Parse",
+            reviewHint: "Correct the rule, then print the sale again.");
+
+        Assert.True(ledger.DeleteLocalHold("hash-hold", requestBodyRetained: false, out var reason));
+        Assert.Equal("", reason);
+        Assert.Null(ledger.Get("hash-hold"));
+        Assert.Empty(new JobLedger(_directory, NullLog.Instance).All());
+    }
+
+    [Fact]
+    public void ALegacyParseHoldWithNoStageCanBeDeleted()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.RecordNeedsReview(
+            "hash-legacy-hold",
+            null,
+            "20261123",
+            "8 of 165 lines print a negative amount and the rest are positive. " +
+            "A sale and a return cannot share one fiscal document.",
+            "jobs/2026-11-23/hash-legacy-hold.txt");
+
+        Assert.True(ledger.DeleteLocalHold("hash-legacy-hold", requestBodyRetained: false, out _));
+        Assert.Null(ledger.Get("hash-legacy-hold"));
+    }
+
+    [Fact]
+    public void AJobThatReachedFiscalisationCannotBeDeleted()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        Assert.True(ledger.Claim("hash-sent", "INV-SENT", "20261124", null, 10m, "USD", "FiscalInvoice"));
+        ledger.MarkFailure("hash-sent", LedgerStatus.NeedsReview, "Not on the server.",
+            reviewStage: "Reconciliation");
+
+        Assert.False(ledger.DeleteLocalHold("hash-sent", requestBodyRetained: false, out var reason));
+        Assert.Contains("fiscalisation", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(ledger.Get("hash-sent"));
+    }
+
+    [Fact]
+    public void ARetainedRequestBodyBlocksDeletionEvenForAParseHold()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.RecordNeedsReview("hash-request", "INV-REQ", "20261124", "Rule did not read a total.",
+            "jobs/hash-request.txt", reviewStage: "Parse");
+
+        Assert.False(ledger.DeleteLocalHold("hash-request", requestBodyRetained: true, out var reason));
+        Assert.Contains("request body", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(ledger.Get("hash-request"));
+    }
+
+    [Fact]
+    public void AFiscalisedJobCannotBeDeleted()
+    {
+        var ledger = new JobLedger(_directory, NullLog.Instance);
+        ledger.Claim("hash-done", "INV-DONE", "20261124", null, 10m, "USD", "FiscalInvoice");
+        ledger.MarkFiscalised("hash-done", new FiscalizeResponse
+        {
+            Success = true,
+            FiscalCode = "CODE-DONE",
+            Receipt = new FiscalReceipt { InvoiceNo = "INV-DONE" }
+        });
+
+        Assert.False(ledger.DeleteLocalHold("hash-done", requestBodyRetained: false, out var reason));
+        Assert.Contains("gateway outcome", reason, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(ledger.Get("hash-done"));
+    }
+
+    [Fact]
     public void AmbiguousFailureBlocksRetry()
     {
         var ledger = new JobLedger(_directory, NullLog.Instance);

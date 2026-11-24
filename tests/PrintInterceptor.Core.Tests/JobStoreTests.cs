@@ -188,6 +188,27 @@ public sealed class JobStoreTests : IDisposable
         Assert.Null(store.RetainedOriginalPath(sourceFile));
     }
 
+    [Fact]
+    public void DeletingALocalHoldRemovesOnlyThatHoldsRetainedFiles()
+    {
+        var store = CreateStore();
+        var raw = "%PDF-1.7\nreceipt"u8.ToArray();
+        var sourceFile = store.Save(
+            "gone-hash", new DecodedJob(true, JobFormat.Pdf, "gone text", null, null), raw);
+        var original = store.SaveOriginalCopy("gone-hash", raw, JobFormat.Pdf);
+        store.SaveRequest(sourceFile, "{}");
+        var originalPath = Path.Combine(Path.GetDirectoryName(original!)!, "gone-hash.pdf");
+        var otherSource = store.Save(
+            "keep-hash", new DecodedJob(true, JobFormat.Text, "keep text", null, null), "keep"u8.ToArray());
+
+        store.DeleteRetained("gone-hash", sourceFile);
+
+        Assert.Null(store.LoadText(sourceFile));
+        Assert.Null(store.LoadRequest(sourceFile));
+        Assert.False(File.Exists(originalPath));
+        Assert.Equal("keep text", store.LoadText(otherSource));
+    }
+
     private JobStore CreateStore() => new(
         new InterceptorConfig { Storage = new StorageConfig { DataDirectory = _directory } },
         NullLog.Instance);

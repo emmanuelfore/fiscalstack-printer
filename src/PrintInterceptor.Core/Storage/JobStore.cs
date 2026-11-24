@@ -256,6 +256,70 @@ public sealed class JobStore
         }
     }
 
+    /// <summary>
+    /// Removes the retained receipt, its request body and the original job bytes when an
+    /// operator deletes a local-only hold. Only files below the jobs root are touched; the
+    /// permanent fiscal archive is deliberately not part of this path.
+    /// </summary>
+    public void DeleteRetained(string hash, string? sourceFile)
+    {
+        if (string.IsNullOrWhiteSpace(hash) || hash.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            !Directory.Exists(_jobsRoot))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var directory in Directory.EnumerateDirectories(_jobsRoot))
+            {
+                foreach (var extension in new[] { ".txt", ".pdf", ".ps", ".bin", ".request.json" })
+                {
+                    TryDelete(Path.Combine(directory, hash + extension), hash);
+                }
+
+                foreach (var extension in new[] { ".pdf", ".ps", ".bin" })
+                {
+                    TryDelete(Path.Combine(directory, "original", hash + extension), hash);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(sourceFile) && IsWithinJobsRoot(sourceFile))
+            {
+                TryDelete(Path.GetFullPath(sourceFile), hash);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"Could not finish removing retained files for deleted hold [{hash[..Math.Min(12, hash.Length)]}]: {ex.Message}");
+        }
+    }
+
+    private bool IsWithinJobsRoot(string path)
+    {
+        var root = Path.GetFullPath(_jobsRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var full = Path.GetFullPath(path);
+        return full.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void TryDelete(string path, string hash)
+    {
+        if (!IsWithinJobsRoot(path) || !File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(path);
+            _log.Info($"Removed retained file '{Path.GetFileName(path)}' for deleted local hold [{hash[..Math.Min(12, hash.Length)]}].");
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"Could not remove retained file '{path}': {ex.Message}");
+        }
+    }
+
     public void Prune()
     {
         if (!_config.Storage.RetainJobs || _config.Storage.RetentionDays <= 0)

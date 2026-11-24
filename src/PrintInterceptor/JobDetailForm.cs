@@ -54,7 +54,7 @@ public sealed class JobDetailForm : Form
             RowCount = 3,
             BackColor = UiTheme.Canvas
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 66));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
 
@@ -70,19 +70,22 @@ public sealed class JobDetailForm : Form
             $"{entry.InvoiceNumber ?? "no invoice number"} · {UiTheme.Status(entry.Status).Text} · " +
             $"{entry.BusinessDate} · {entry.Currency} {entry.Total:0.00}"));
         subtitle.Dock = DockStyle.Top;
+        subtitle.AutoSize = false;
+        subtitle.Height = 30;
+        subtitle.AutoEllipsis = true;
         subtitle.Padding = new Padding(0, 4, 0, 0);
         header.Controls.Add(subtitle);
         header.Controls.Add(title);
 
         _tabs = new TabControl { Dock = DockStyle.Fill, Font = UiTheme.Ui(9f), BackColor = UiTheme.Surface };
         _preview = new TabPage("PDF preview") { BackColor = UiTheme.Surface, Padding = new Padding(8) };
-        _summary = TextPage("Summary", Summary(entry, snapshots));
+        _summary = TextPage("Summary", Summary(entry, snapshots), wordWrap: true);
         _tabs.TabPages.Add(_preview);
         _tabs.TabPages.Add(_summary);
         _tabs.TabPages.Add(TextPage("Request sent", PrettyJson(jobs.LoadRequest(entry.SourceFile))
             ?? "(The request body was not retained. Turn storage.retainJobs on to keep it for review and reconciliation.)"));
         _tabs.TabPages.Add(TextPage("Receipt text", jobs.LoadText(entry.SourceFile)
-            ?? "(The decoded receipt text was not retained.)"));
+            ?? "(The decoded receipt text was not retained.)", wordWrap: true));
         BuildPreview(entry, snapshots);
 
         var buttons = new FlowLayoutPanel
@@ -158,14 +161,28 @@ public sealed class JobDetailForm : Form
 
         try
         {
-            var note = new Label
+            var layout = new TableLayoutPanel
             {
-                Text = UiTheme.SafeText(
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = UiTheme.Surface
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+            var note = new TextBox
+            {
+                Text =
                     "Rendered from the archived fiscal record. The verification code, QR payload, " +
-                    "fiscal codes, totals, tax buckets and taxType are unchanged. Long documents show page 1."),
-                Dock = DockStyle.Top,
-                AutoSize = false,
-                Height = 38,
+                    "fiscal codes, totals, tax buckets and taxType are unchanged. Long documents show page 1.",
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                ReadOnly = true,
+                WordWrap = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = UiTheme.Surface,
                 Font = UiTheme.Ui(8.5f),
                 ForeColor = UiTheme.Muted,
                 Padding = new Padding(4, 4, 4, 2)
@@ -177,8 +194,9 @@ public sealed class JobDetailForm : Form
                 BackColor = UiTheme.Canvas,
                 Image = A4InvoicePrinter.RenderPreview(model!, _log)
             };
-            _preview.Controls.Add(picture);
-            _preview.Controls.Add(note);
+            layout.Controls.Add(note, 0, 0);
+            layout.Controls.Add(picture, 0, 1);
+            _preview.Controls.Add(layout);
             _preview.Tag = true;
         }
         catch (Exception ex)
@@ -196,7 +214,7 @@ public sealed class JobDetailForm : Form
         }
     }
 
-    private static TabPage TextPage(string title, string content)
+    private static TabPage TextPage(string title, string content, bool wordWrap = false)
     {
         var page = new TabPage(title) { BackColor = UiTheme.Surface, Padding = new Padding(6) };
         var box = new TextBox
@@ -204,8 +222,8 @@ public sealed class JobDetailForm : Form
             Dock = DockStyle.Fill,
             Multiline = true,
             ReadOnly = true,
-            ScrollBars = ScrollBars.Both,
-            WordWrap = false,
+            ScrollBars = wordWrap ? ScrollBars.Vertical : ScrollBars.Both,
+            WordWrap = wordWrap,
             Font = UiTheme.Mono(9f),
             Padding = new Padding(8)
         };
